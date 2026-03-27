@@ -1209,13 +1209,13 @@ def ui():
     // Available height for the entire rack-wrapper (label + rack + ip + status)
     const gridH = container.clientHeight || 400;
     // Measure actual chrome height from an existing rack wrapper, or estimate
-    let chrome = 120;
+    let chrome = 50;
     const existingWrapper = container.querySelector(".rack-wrapper");
     if (existingWrapper) {
       const rackEl = existingWrapper.querySelector(".rack");
       if (rackEl) {
         chrome = existingWrapper.offsetHeight - rackEl.offsetHeight;
-        if (chrome < 40) chrome = 120; // fallback if not yet laid out
+        if (chrome < 20) chrome = 50; // fallback if not yet laid out
       }
     }
     const rackH = Math.max(80, gridH - chrome);
