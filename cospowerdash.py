@@ -820,7 +820,7 @@ def ui():
     width: 100%;
     height: var(--rackH);
     border:1px solid rgba(255,255,255,0.14);
-    border-radius: 0;
+    border-radius: 0 0 18px 18px;
     position:relative;
     background: rgba(0,0,0,0.25);
     border-top: none;
@@ -1133,6 +1133,7 @@ def ui():
         <label style="cursor:pointer;white-space:nowrap"><input type="radio" name="additionalPdu" value="yes" id="addPduYes" /> Yes</label>
       </div>
 
+      <div id="addError" style="color:#f87171;font-weight:700;font-size:13px;min-height:18px;margin-bottom:4px"></div>
       <div class="row">
         <button id="applyBtn" class="primary disabled" disabled onclick="applyRack()">Apply</button>
         <button onclick="closeAdd()">Cancel</button>
@@ -1264,7 +1265,7 @@ def ui():
 
       let div = document.createElement("div");
       div.className = "rack" + (isEdit ? " edit" : "");
-      div.style.borderRadius = "0";
+      div.style.borderRadius = "0 0 18px 18px";
       div.style.width = "100%";
 
       if (isEdit) {
@@ -1497,6 +1498,7 @@ def ui():
     document.getElementById("pduStatusText").innerText = "Waiting for PDU\u2026";
     document.getElementById("pdu2Light").classList.remove("green");
     document.getElementById("pdu2StatusText").innerText = "Waiting for PDU\u2026";
+    document.getElementById("addError").textContent = "";
 
     updateApplyBtn();
 
@@ -1617,8 +1619,11 @@ def ui():
     const pdu2Ip = document.getElementById("pdu2Ip").value.trim();
     const hasAdditionalPdu = document.getElementById("addPduYes").checked;
 
+    const errEl = document.getElementById("addError");
+    errEl.textContent = "";
+
     if (!label || !pduIp) {
-      setPduOk(false, "Enter label + PDU IP");
+      errEl.textContent = "Enter label + PDU IP";
       return;
     }
 
@@ -1633,9 +1638,15 @@ def ui():
       });
       const data = await res.json();
       if (data.ok) closeAdd();
-      else setPduOk(false, data.error || "Add failed");
+      else {
+        errEl.textContent = data.error || "Add failed";
+        btn.disabled = false;
+        btn.classList.remove("disabled");
+      }
     } catch(e) {
-      setPduOk(false, "Add failed");
+      errEl.textContent = "Add failed";
+      btn.disabled = false;
+      btn.classList.remove("disabled");
     }
   }
 
