@@ -6,8 +6,6 @@ import subprocess
 from logging.handlers import RotatingFileHandler
 from typing import Dict, Set, List, Optional
 
-import httpx
-
 from fastapi import FastAPI, WebSocket
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
@@ -17,15 +15,8 @@ from pydantic import BaseModel
 # ----------------------------
 
 DB = "upsdash.db"
-SNMP_COMMUNITY = "COS65"
-OID_LOAD_PCT = "1.3.6.1.2.1.33.1.4.4.1.5.1"                 # UPS-MIB upsOutputLoad.1
-OID_STATE = "1.3.6.1.4.1.318.1.1.1.2.2.2.0"                 # APC PowerNet UPS state (5=bypass)
-OID_UPS_STATUS = "1.3.6.1.4.1.318.1.1.1.2.1.1.0"            # APC UPS basic output status
-OID_TEMP = "1.3.6.1.2.1.33.1.2.7.0"                         # UPS-MIB upsBatteryTemperature (°C)
-OID_RUNTIME = "1.3.6.1.2.1.33.1.2.3.0"                      # UPS-MIB upsEstimatedMinutesRemaining
-OID_OUTPUT_AMPS = "1.3.6.1.4.1.318.1.1.1.4.3.4.0"          # APC high-prec output current (tenths A)
-OID_OUTPUT_WATTS = "1.3.6.1.4.1.318.1.1.1.4.2.8.0"         # APC output watts
-DEFAULT_DASH_TITLE = "COS65 Power Dashboard"
+SNMP_COMMUNITY = "public"
+DEFAULT_DASH_TITLE = "Power Dashboard"
 
 # FS MPDU (enterprise 30966) per-outlet OIDs
 OID_PDU_OUTLET_CURRENT = "1.3.6.1.4.1.30966.8.1.8.1"   # .{port}.0 -> STRING (Amps)
@@ -45,17 +36,6 @@ PDU_CIRCUITS = [
     {"circuit": 6, "snmp_idx": 24, "ports": [21, 22, 23, 24]},
 ]
 
-# APC UPS basic output status codes -> display labels
-UPS_STATUS_MAP = {
-    1: "UNKNOWN",
-    2: "ONLINE",
-    3: "ON BATTERY",
-    4: "ON BYPASS",      # smart boost / smart trim may also report here
-    5: "REBOOTING",
-    6: "OFFLINE",
-    7: "OVERLOAD",
-}
-
 # ----------------------------
 # Logging
 # ----------------------------
@@ -73,88 +53,6 @@ _stream_handler = logging.StreamHandler()
 _stream_handler.setLevel(logging.INFO)
 _stream_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
 logger.addHandler(_stream_handler)
-
-# Dedicated UPS event logger -> upsdash_events.log (independent of standard logs)
-event_logger = logging.getLogger("upsdash.events")
-event_logger.setLevel(logging.INFO)
-event_logger.propagate = False
-
-_event_handler = RotatingFileHandler("upsdash_events.log", maxBytes=1_000_000, backupCount=5)
-_event_handler.setFormatter(logging.Formatter("%(asctime)s  %(message)s"))
-event_logger.addHandler(_event_handler)
-
-# ----------------------------
-# Slack Alerts
-# ----------------------------
-
-_slack_client: Optional[httpx.AsyncClient] = None
-
-def _get_slack_client() -> httpx.AsyncClient:
-    global _slack_client
-    if _slack_client is None:
-        _slack_client = httpx.AsyncClient(timeout=10)
-    return _slack_client
-
-async def send_slack_alert(label: str, ups_status: str, alert_type: str,
-                           load_pct=None, runtime_min=None,
-                           output_watts=None, output_amps=None, temp_c=None):
-    """Send a context-specific power alert to the configured Slack webhook."""
-    webhook_url = get_setting("slack_webhook_url", "")
-    if not webhook_url:
-        return
-
-    emoji_map = {
-        "ON BATTERY": ":zap:",
-        "ON BYPASS": ":warning:",
-        "OFFLINE": ":red_circle:",
-        "ONLINE": ":large_green_circle:",
-    }
-    emoji = emoji_map.get(ups_status, ":rotating_light:")
-    is_recovery = alert_type.endswith("_recovery")
-    header = "*COS65 POWER RECOVERY*" if is_recovery else "*COS65 POWER ALERT*"
-
-    lines = [f"{emoji} {header}", f"UPS: {label}", f"Status: {ups_status}"]
-
-    base_type = alert_type.removesuffix("_recovery")
-
-    if base_type == "offline":
-        if is_recovery:
-            # Back online — show current load to confirm healthy
-            if load_pct is not None:
-                lines.append(f"Load: {load_pct}%")
-        # Offline alert: no SNMP data available, nothing else to show
-
-    elif base_type == "bypass":
-        # Bypass: UPS is passing utility power directly — runtime is irrelevant
-        if load_pct is not None:
-            lines.append(f"Load: {load_pct}%")
-        if output_watts is not None:
-            lines.append(f"Output: {output_watts}W")
-        elif output_amps is not None:
-            lines.append(f"Output: {output_amps}A")
-
-    elif base_type == "on_battery":
-        # On battery: runtime and load are the critical metrics
-        if load_pct is not None:
-            lines.append(f"Load: {load_pct}%")
-        if runtime_min is not None:
-            lines.append(f"Runtime Remaining: {runtime_min} min")
-
-    else:
-        # Fallback for any future alert types — show all available metrics
-        if load_pct is not None:
-            lines.append(f"Load: {load_pct}%")
-        if runtime_min is not None:
-            lines.append(f"Runtime Remaining: {runtime_min} min")
-
-    text = "\n".join(lines)
-    try:
-        client = _get_slack_client()
-        resp = await client.post(webhook_url, json={"text": text})
-        if resp.status_code != 200:
-            logger.warning("Slack webhook returned %s: %s", resp.status_code, resp.text)
-    except Exception as e:
-        logger.warning("Failed to send Slack alert: %s", e)
 
 # ----------------------------
 # App
@@ -177,7 +75,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS racks (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             label TEXT NOT NULL,
-            ups_ip TEXT NOT NULL,
+            pdu_ip TEXT NOT NULL DEFAULT '',
             community TEXT NOT NULL DEFAULT 'COS65'
         )
     """)
@@ -248,26 +146,26 @@ def get_racks():
     conn = _connect()
     cur = conn.cursor()
     cur.execute("""
-        SELECT id,label,ups_ip,COALESCE(sort_order,id),COALESCE(pdu_ip,''),COALESCE(has_additional_pdu,0)
+        SELECT id,label,COALESCE(sort_order,id),COALESCE(pdu_ip,''),COALESCE(has_additional_pdu,0)
         FROM racks
         ORDER BY COALESCE(sort_order,id), id
     """)
     rows = cur.fetchall()
     conn.close()
-    return [{"id": r[0], "label": r[1], "ups_ip": r[2], "sort_order": r[3], "pdu_ip": r[4], "has_additional_pdu": bool(r[5])} for r in rows]
+    return [{"id": r[0], "label": r[1], "sort_order": r[2], "pdu_ip": r[3], "has_additional_pdu": bool(r[4])} for r in rows]
 
 def _next_sort_order(cur) -> int:
     cur.execute("SELECT COALESCE(MAX(sort_order), 0) FROM racks")
     row = cur.fetchone()
     return int(row[0] or 0) + 1
 
-def add_rack(label: str, ups_ip: str, pdu_ip: str = "", has_additional_pdu: bool = False):
+def add_rack(label: str, pdu_ip: str = "", has_additional_pdu: bool = False):
     conn = _connect()
     cur = conn.cursor()
     next_order = _next_sort_order(cur)
     cur.execute(
-        "INSERT INTO racks(label, ups_ip, community, sort_order, pdu_ip, has_additional_pdu) VALUES(?,?,?,?,?,?)",
-        (label, ups_ip, SNMP_COMMUNITY, next_order, pdu_ip, int(has_additional_pdu)),
+        "INSERT INTO racks(label, pdu_ip, community, sort_order, has_additional_pdu) VALUES(?,?,?,?,?)",
+        (label, pdu_ip, SNMP_COMMUNITY, next_order, int(has_additional_pdu)),
     )
     conn.commit()
     conn.close()
@@ -474,17 +372,9 @@ def _parse_float(text: str) -> Optional[float]:
 # ----------------------------
 
 latest_status: Dict[int, Dict] = {}
-previous_status: Dict[int, Dict] = {}
 latest_systems_status: Dict[int, List[Dict]] = {}
 latest_pdu_circuits: Dict[int, List[Dict]] = {}
 
-# Slack alert debounce: tracks when a UPS first entered an alert state.
-# Key = (rid, alert_type), value = monotonic timestamp of first detection.
-# Alert is only sent after the state persists for SLACK_ALERT_DELAY seconds.
-import time as _time
-SLACK_ALERT_DELAY = 15  # seconds a UPS must remain in alert state before notifying
-_alert_pending: Dict[tuple, float] = {}   # (rid, alert_type) -> first_seen timestamp
-_alert_sent: Dict[tuple, bool] = {}       # (rid, alert_type) -> True if already notified
 _pdu_name_cache: Dict[str, Dict[int, str]] = {}   # pdu_ip -> {port: name}
 _pdu_name_cache_tick: Dict[str, int] = {}          # pdu_ip -> poll count at last refresh
 _poll_count = 0
@@ -499,19 +389,9 @@ def build_ordered_snapshot() -> List[Dict]:
         status = latest_status.get(rid) or {
             "id": rid,
             "label": r["label"],
-            "ups_ip": r["ups_ip"],
-            "reachable": False,
-            "load_pct": None,
-            "bypass": False,
-            "ups_status": "UNKNOWN",
-            "temp_c": None,
-            "runtime_min": None,
-            "output_amps": None,
-            "output_watts": None,
             "sort_order": r.get("sort_order"),
         }
         status["label"] = r["label"]
-        status["ups_ip"] = r["ups_ip"]
         status["pdu_ip"] = r.get("pdu_ip", "")
         status["has_additional_pdu"] = r.get("has_additional_pdu", False)
         status["sort_order"] = r.get("sort_order")
@@ -533,132 +413,6 @@ async def broadcast_snapshot():
     for ws in dead:
         clients.discard(ws)
 
-def _maybe_slack_alert(rid: int, alert_type: str, label: str, status_text: str,
-                       load_pct=None, runtime_min=None,
-                       output_watts=None, output_amps=None, temp_c=None):
-    """Debounce Slack alerts: only fire after the condition persists for SLACK_ALERT_DELAY seconds."""
-    key = (rid, alert_type)
-    now = _time.monotonic()
-    if key not in _alert_pending:
-        _alert_pending[key] = now
-        logger.debug("Alert pending: %s %s — waiting %ds", label, alert_type, SLACK_ALERT_DELAY)
-        return
-    elapsed = now - _alert_pending[key]
-    if elapsed >= SLACK_ALERT_DELAY and not _alert_sent.get(key):
-        _alert_sent[key] = True
-        logger.info("Alert confirmed after %ds: %s %s — sending Slack notification", int(elapsed), label, alert_type)
-        asyncio.create_task(send_slack_alert(
-            label, status_text, alert_type,
-            load_pct=load_pct, runtime_min=runtime_min,
-            output_watts=output_watts, output_amps=output_amps, temp_c=temp_c,
-        ))
-
-# Tracks which (rid, alert_type) need a recovery message
-_recovery_pending: Dict[tuple, bool] = {}  # (rid, alert_type) -> True if recovery needed
-
-def _clear_alert(rid: int, alert_type: str):
-    """Clear a pending/sent alert when the condition resolves. Mark recovery if alert was sent."""
-    key = (rid, alert_type)
-    was_sent = _alert_sent.get(key, False)
-    _alert_pending.pop(key, None)
-    _alert_sent.pop(key, None)
-    if was_sent:
-        _recovery_pending[key] = True
-
-def _check_recovery(rid: int, alert_type: str, label: str,
-                     load_pct=None, runtime_min=None,
-                     output_watts=None, output_amps=None, temp_c=None):
-    """Debounce recovery: only send ONLINE after condition is clear for SLACK_ALERT_DELAY."""
-    key = (rid, alert_type)
-    if not _recovery_pending.get(key):
-        return
-    recovery_key = (rid, alert_type + "_recovery")
-    _maybe_slack_alert(rid, alert_type + "_recovery", label, "ONLINE",
-                       load_pct=load_pct, runtime_min=runtime_min,
-                       output_watts=output_watts, output_amps=output_amps, temp_c=temp_c)
-    if _alert_sent.get(recovery_key):
-        # Recovery sent, clean up
-        _recovery_pending.pop(key, None)
-        _alert_pending.pop(recovery_key, None)
-        _alert_sent.pop(recovery_key, None)
-
-def _cancel_recovery(rid: int, alert_type: str):
-    """Cancel recovery if UPS goes back into alert state before recovery fires."""
-    key = (rid, alert_type)
-    _recovery_pending.pop(key, None)
-    recovery_key = (rid, alert_type + "_recovery")
-    _alert_pending.pop(recovery_key, None)
-    _alert_sent.pop(recovery_key, None)
-
-def _check_events(rid: int, label: str, ip: str, reachable: bool, load_pct, bypass: bool,
-                   ups_status: str = "UNKNOWN", runtime_min=None,
-                   output_watts=None, output_amps=None, temp_c=None):
-    """Compare current poll result to previous state and log significant events."""
-    prev = previous_status.get(rid)
-    metrics = dict(load_pct=load_pct, runtime_min=runtime_min,
-                   output_watts=output_watts, output_amps=output_amps, temp_c=temp_c)
-
-    if prev is None:
-        event_logger.info(
-            "NEW — %s (%s) first poll, load=%s%%, reachable=%s",
-            label, ip, load_pct if load_pct is not None else "N/A", reachable,
-        )
-        return
-
-    # Reachability changes
-    if prev["reachable"] and not reachable:
-        event_logger.info("OFFLINE — %s (%s) is unreachable", label, ip)
-    elif not prev["reachable"] and reachable:
-        event_logger.info("ONLINE — %s (%s) is now reachable", label, ip)
-
-    # Debounced Slack: offline
-    if not reachable:
-        _maybe_slack_alert(rid, "offline", label, "OFFLINE", **metrics)
-        _cancel_recovery(rid, "offline")
-    else:
-        _clear_alert(rid, "offline")
-        _check_recovery(rid, "offline", label, **metrics)
-
-    # Bypass changes
-    if not prev["bypass"] and bypass:
-        event_logger.info("BYPASS ON — %s (%s) entered bypass mode", label, ip)
-    elif prev["bypass"] and not bypass:
-        event_logger.info("BYPASS OFF — %s (%s) exited bypass mode", label, ip)
-
-    # Debounced Slack: bypass
-    if bypass:
-        _maybe_slack_alert(rid, "bypass", label, "ON BYPASS", **metrics)
-        _cancel_recovery(rid, "bypass")
-    else:
-        _clear_alert(rid, "bypass")
-        _check_recovery(rid, "bypass", label, **metrics)
-
-    # ON BATTERY transition logging
-    prev_status = prev.get("ups_status", "UNKNOWN")
-    if ups_status == "ON BATTERY" and prev_status != "ON BATTERY":
-        event_logger.info("ON BATTERY — %s (%s) running on battery", label, ip)
-
-    # Debounced Slack: on battery
-    if ups_status == "ON BATTERY":
-        _maybe_slack_alert(rid, "on_battery", label, "ON BATTERY", **metrics)
-        _cancel_recovery(rid, "on_battery")
-    else:
-        _clear_alert(rid, "on_battery")
-        _check_recovery(rid, "on_battery", label, **metrics)
-
-    # Load threshold crossings
-    prev_load = prev.get("load_pct")
-    if load_pct is not None:
-        prev_above_95 = prev_load is not None and prev_load >= 95
-        prev_above_85 = prev_load is not None and prev_load >= 90
-
-        if load_pct >= 95 and not prev_above_95:
-            event_logger.info("CRITICAL LOAD — %s (%s) at %d%%", label, ip, load_pct)
-        elif load_pct >= 90 and not prev_above_85:
-            event_logger.info("HIGH LOAD — %s (%s) at %d%%", label, ip, load_pct)
-        elif prev_above_85 and load_pct < 90:
-            event_logger.info("LOAD NORMAL — %s (%s) at %d%%", label, ip, load_pct)
-
 async def poll_loop():
     while True:
         try:
@@ -668,83 +422,13 @@ async def poll_loop():
             for rid in list(latest_status.keys()):
                 if rid not in current_ids:
                     latest_status.pop(rid, None)
-                    previous_status.pop(rid, None)
 
             for rack in racks:
                 rid = rack["id"]
-                ip = rack["ups_ip"]
-
-                reachable = ping_ok(ip)
-                load_pct = None
-                bypass = False
-                temp_val = None
-                runtime_val = None
-                out_amps_val = None
-                out_watts_val = None
-
-                ups_status = "UNKNOWN"
-
-                if reachable:
-                    load_raw = snmp_get(ip, OID_LOAD_PCT)
-                    load_val = _parse_int(load_raw or "")
-                    if load_val is not None:
-                        load_pct = load_val
-
-                    state_raw = snmp_get(ip, OID_STATE)
-                    state_val = _parse_int(state_raw or "")
-                    if state_val is not None and state_val == 5:
-                        bypass = True
-
-                    status_raw = snmp_get(ip, OID_UPS_STATUS)
-                    status_val = _parse_int(status_raw or "")
-                    if status_val is not None:
-                        ups_status = UPS_STATUS_MAP.get(status_val, "UNKNOWN")
-
-                    temp_raw = snmp_get(ip, OID_TEMP)
-                    temp_val = _parse_int(temp_raw or "")
-
-                    runtime_raw = snmp_get(ip, OID_RUNTIME)
-                    runtime_val = _parse_int(runtime_raw or "")
-
-                    out_amps_raw = snmp_get(ip, OID_OUTPUT_AMPS)
-                    out_amps_int = _parse_int(out_amps_raw or "")
-                    out_amps_val = round(out_amps_int / 10, 1) if out_amps_int is not None else None
-
-                    out_watts_raw = snmp_get(ip, OID_OUTPUT_WATTS)
-                    out_watts_val = _parse_int(out_watts_raw or "")
-
-                    # If host is pingable but all SNMP queries failed, treat as offline
-                    if ups_status == "UNKNOWN" and load_pct is None:
-                        reachable = False
-                        ups_status = "OFFLINE"
-                else:
-                    ups_status = "OFFLINE"
-
-                _check_events(rid, rack["label"], ip, reachable, load_pct, bypass,
-                              ups_status=ups_status, runtime_min=runtime_val,
-                              output_watts=out_watts_val, output_amps=out_amps_val,
-                              temp_c=temp_val)
-
                 latest_status[rid] = {
                     "id": rid,
                     "label": rack["label"],
-                    "ups_ip": ip,
-                    "reachable": reachable,
-                    "load_pct": load_pct,
-                    "bypass": bypass,
-                    "ups_status": ups_status,
-                    "temp_c": temp_val,
-                    "runtime_min": runtime_val,
-                    "output_amps": out_amps_val,
-                    "output_watts": out_watts_val,
                     "sort_order": rack.get("sort_order"),
-                }
-
-                previous_status[rid] = {
-                    "reachable": reachable,
-                    "load_pct": load_pct,
-                    "bypass": bypass,
-                    "ups_status": ups_status,
                 }
 
             # Poll PDU circuits for racks that have a pdu_ip
@@ -833,7 +517,7 @@ async def poll_loop():
 @app.on_event("startup")
 async def startup():
     init_db()
-    logger.info("UPSDash starting, database initialized")
+    logger.info("Power Dashboard starting, database initialized")
     asyncio.create_task(poll_loop())
 
 # ----------------------------
@@ -842,8 +526,7 @@ async def startup():
 
 class Rack(BaseModel):
     label: str
-    ups_ip: str
-    pdu_ip: str = ""
+    pdu_ip: str
     has_additional_pdu: bool = False
 
 class TitlePayload(BaseModel):
@@ -864,12 +547,11 @@ class OrderPayload(BaseModel):
 @app.post("/api/racks")
 def api_add_rack(r: Rack):
     label = (r.label or "").strip()
-    ip = (r.ups_ip or "").strip()
     pdu_ip = (r.pdu_ip or "").strip()
-    if not label or not ip:
-        return {"ok": False, "error": "Missing label or IP"}
-    add_rack(label, ip, pdu_ip, r.has_additional_pdu)
-    logger.info("Rack added: %s (UPS %s, PDU %s, additional_pdu=%s)", label, ip, pdu_ip or "none", r.has_additional_pdu)
+    if not label or not pdu_ip:
+        return {"ok": False, "error": "Missing label or PDU IP"}
+    add_rack(label, pdu_ip, r.has_additional_pdu)
+    logger.info("Rack added: %s (PDU %s, additional_pdu=%s)", label, pdu_ip, r.has_additional_pdu)
     return {"ok": True}
 
 @app.post("/api/delete")
@@ -886,19 +568,6 @@ def api_delete(data: dict):
         delete_systems_for_rack(rid)
     logger.info("Racks deleted: %s", ids_int)
     return {"ok": True}
-
-@app.post("/api/check")
-def api_check(data: dict):
-    ip = (data.get("ups_ip") or "").strip()
-    if not ip:
-        return {"ok": False}
-    if not ping_ok(ip):
-        return {"ok": False}
-    test = snmp_get(ip, OID_LOAD_PCT)
-    ok = False
-    if test:
-        ok = ("INTEGER:" in test) or ("Gauge32:" in test)
-    return {"ok": ok}
 
 @app.post("/api/check_pdu")
 def api_check_pdu_ip(data: dict):
@@ -935,33 +604,6 @@ def api_set_title(p: TitlePayload):
     set_setting("dashboard_title", title)
     logger.info("Dashboard title changed to: %s", title)
     return {"ok": True, "title": title}
-
-@app.get("/api/settings/slack_webhook")
-def api_get_slack_webhook():
-    url = get_setting("slack_webhook_url", "")
-    return {"ok": True, "url": url}
-
-@app.post("/api/settings/slack_webhook")
-def api_set_slack_webhook(p: dict):
-    url = (p.get("url") or "").strip()
-    set_setting("slack_webhook_url", url)
-    logger.info("Slack webhook URL %s", "configured" if url else "cleared")
-    return {"ok": True, "url": url}
-
-@app.post("/api/settings/slack_test")
-async def api_test_slack(p: dict):
-    url = (p.get("url") or "").strip()
-    if not url:
-        return {"ok": False, "error": "No webhook URL provided"}
-    try:
-        client = _get_slack_client()
-        text = ":rotating_light: *COS65 POWER ALERT*\nThis is a test alert from UPSDash."
-        resp = await client.post(url, json={"text": text})
-        if resp.status_code == 200:
-            return {"ok": True}
-        return {"ok": False, "error": f"Slack returned {resp.status_code}"}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
 
 # ----------------------------
 # Systems API
@@ -1220,28 +862,7 @@ def ui():
     border-radius: 18px 18px 0 0;
   }
 
-  .bypass-tag {
-    position: absolute;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: #ff4d4d;
-    font-weight: 900;
-    animation: blink 1s infinite;
-    letter-spacing: 2px;
-    font-size: clamp(14px, 5cqi, 28px);
-    text-shadow: 0 0 10px rgba(255,77,77,0.6);
-    background: none;
-    z-index: 1;
-    pointer-events: none;
-  }
-  @keyframes blink { 50% { opacity:0; } }
-
-  /* PDU circuit area (upper portion of rack) */
+  /* PDU circuit area */
   .server-area {
     flex: 1 1 0;
     min-height: 0;
@@ -1350,157 +971,6 @@ def ui():
     letter-spacing: 0.5px;
   }
 
-  /* UPS info section (bottom of rack) */
-  .ups-info {
-    border-top: 1px solid rgba(255,255,255,0.10);
-    padding: 8px 10px 6px;
-    background: rgba(0,0,0,0.18);
-    flex-shrink: 0;
-  }
-
-  .ups-info-layout {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    grid-template-rows: auto auto;
-    gap: 2px 8px;
-  }
-
-  .ups-top-left {
-    display: flex;
-    flex-direction: column;
-    justify-content: center;
-    min-width: 0;
-    padding: 4px 2px;
-  }
-
-  .ups-top-right {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-
-  .ups-output-row {
-    grid-column: 1 / -1;
-    display: flex;
-    justify-content: space-around;
-    align-items: center;
-    padding: 2px 6px;
-  }
-  .ups-output-metric {
-    display: flex;
-    align-items: baseline;
-    gap: 5px;
-  }
-  .ups-output-val {
-    font-weight: 900;
-    font-size: clamp(16px, 5cqi, 48px);
-    line-height: 1.1;
-  }
-  .ups-output-val.amps { color: #38bdf8; }
-  .ups-output-val.watts { color: #a78bfa; }
-  .ups-output-unit {
-    font-size: clamp(10px, 2.5cqi, 36px);
-    font-weight: 700;
-    color: rgba(148,163,184,0.5);
-    text-transform: uppercase;
-  }
-  .ups-bottom-full {
-    grid-column: 1 / -1;
-  }
-
-  .ups-metric {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    font-size: 13px;
-    line-height: 1.4;
-    padding: 2px 6px;
-    gap: 4px;
-  }
-  .ups-metric-label {
-    opacity: 0.6;
-    font-weight: 600;
-    white-space: nowrap;
-    font-size: clamp(13px, 3.5cqi, 36px);
-  }
-  .ups-metric-value {
-    font-weight: 900;
-    white-space: nowrap;
-    font-size: clamp(14px, 4cqi, 40px);
-  }
-
-  /* Horizontal segmented load bar */
-  .load-bar-row {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    margin-top: 4px;
-  }
-  .load-pct-label {
-    font-weight: 900;
-    font-size: clamp(11px, 3.5cqi, 36px);
-    white-space: nowrap;
-    min-width: 38px;
-  }
-  .load-bar-track {
-    flex: 1;
-    display: flex;
-    height: 28px;
-  }
-  .load-seg {
-    flex: 1;
-    border-right: 2px solid #1a1f2e;
-    background: rgba(255,255,255,0.08);
-    transition: background 300ms;
-  }
-  .load-seg:last-child {
-    border-right: none;
-  }
-  .load-seg.on-green { background: #22c55e; box-shadow: 0 0 4px rgba(34,197,94,0.4); }
-  .load-seg.on-amber { background: #f59e0b; box-shadow: 0 0 4px rgba(245,158,11,0.4); }
-  .load-seg.on-red   { background: #ef4444; box-shadow: 0 0 4px rgba(239,68,68,0.4); }
-
-  /* Large battery icon */
-  .battery-lg {
-    width: 100%;
-    aspect-ratio: 2 / 1;
-    max-height: 42px;
-    border: 2px solid rgba(255,255,255,0.5);
-    border-radius: 4px;
-    position: relative;
-    display: flex;
-    align-items: center;
-    padding: 3px;
-  }
-  .battery-lg::after {
-    content: "";
-    position: absolute;
-    right: -6px;
-    top: 50%;
-    transform: translateY(-50%);
-    width: 4px;
-    height: 40%;
-    background: rgba(255,255,255,0.5);
-    border-radius: 0 2px 2px 0;
-  }
-  .battery-lg-fill {
-    height: 100%;
-    border-radius: 2px;
-    transition: width 300ms, background 300ms;
-  }
-  .battery-lg-text {
-    position: absolute;
-    inset: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-weight: 900;
-    font-size: 11px;
-    color: white;
-    text-shadow: 0 1px 3px rgba(0,0,0,0.6);
-    z-index: 1;
-  }
-
   .rack-wrapper {
     display: flex;
     flex-direction: column;
@@ -1523,20 +993,6 @@ def ui():
     border: 1px solid rgba(255,255,255,0.14);
     border-top: none;
     border-bottom: none;
-  }
-
-  .status-banner {
-    margin-top: -1px;
-    padding: 6px 10px;
-    border-radius: 0 0 18px 18px;
-    text-align: center;
-    font-weight: 900;
-    text-transform: uppercase;
-    letter-spacing: 1.2px;
-    color: white;
-    font-size: clamp(15px, 5cqi, 48px);
-    border: 1px solid rgba(255,255,255,0.14);
-    border-top: none;
   }
 
   .modal {
@@ -1692,14 +1148,7 @@ def ui():
     <div class="modal-content">
       <h3>Add Rack</h3>
       <input id="label" placeholder="Rack Label" />
-      <input id="ip" placeholder="UPS IP" />
-
-      <div class="status-wrap">
-        <div id="light" class="status-light"></div>
-        <div id="statusText" class="status-text">Waiting for UPS…</div>
-      </div>
-
-      <input id="pduIp" placeholder="PDU IP (optional)" />
+      <input id="pduIp" placeholder="PDU IP" />
       <div class="status-wrap">
         <div id="pduLight" class="status-light"></div>
         <div id="pduStatusText" class="status-text">Waiting for PDU…</div>
@@ -1741,12 +1190,6 @@ def ui():
         <span style="color:#cbd5e1;font-weight:600;white-space:nowrap">Viewport Style:</span>
         <label style="cursor:pointer;white-space:nowrap"><input type="radio" name="viewportStyle" value="racks" id="vpRacks" checked /> Racks</label>
         <label style="cursor:pointer;white-space:nowrap"><input type="radio" name="viewportStyle" value="fill" id="vpFill" /> Fill</label>
-      </div>
-      <div style="margin-top:12px">
-        <div style="margin-bottom:4px"><span style="color:#cbd5e1;font-weight:600">Slack Webhook URL:</span></div>
-        <input id="slackWebhookInput" style="width:100%;box-sizing:border-box" />
-        <button onclick="testSlack()" style="margin-top:4px;font-size:0.85em;padding:4px 10px;background:#444;color:#ccc;border:1px solid #555;border-radius:4px;cursor:pointer">Test Slack</button>
-        <span id="slackTestResult" style="margin-left:8px;font-size:0.85em"></span>
       </div>
       <div class="row" style="margin-top:12px">
         <button class="primary" onclick="saveSettings()">Save</button>
@@ -1840,16 +1283,6 @@ def ui():
 
     racks = [...racks];
     computeRackSize(racks.length);
-
-    const STATUS_COLORS = {
-      "ONLINE":     "#166534",
-      "ON BATTERY": "#d97706",
-      "ON BYPASS":  "#9333ea",
-      "REBOOTING":  "#2563eb",
-      "OFFLINE":    "#dc2626",
-      "OVERLOAD":   "#dc2626",
-      "UNKNOWN":    "#475569",
-    };
 
     racks.forEach(r => {
       let wrapper = document.createElement("div");
@@ -2001,150 +1434,9 @@ def ui():
         serverArea.appendChild(msg);
       }
 
-      // --- "Additional PDUs" delta block when rack is flagged ---
-      if (r.has_additional_pdu && circuits.length > 0 && r.output_watts !== null && r.output_watts !== undefined) {
-        const pduTotalW = circuits.reduce((sum, c) => sum + (c.reachable ? c.power_w : 0), 0);
-        const pduTotalA = circuits.reduce((sum, c) => sum + (c.reachable ? c.current_a : 0), 0);
-        const deltaW = Math.max(0, r.output_watts - pduTotalW);
-        const deltaA = (r.output_amps !== null && r.output_amps !== undefined) ? Math.max(0, r.output_amps - pduTotalA) : null;
-        {
-          let block = document.createElement("div");
-          block.className = "crt-block additional-pdu";
-
-          let lbl = document.createElement("div");
-          lbl.className = "crt-label";
-          lbl.textContent = "ADDITIONAL PDUs";
-          block.appendChild(lbl);
-
-          let body = document.createElement("div");
-          body.className = "crt-body";
-
-          let spacer = document.createElement("div");
-          spacer.className = "crt-outlets";
-          spacer.innerHTML = '<div class="crt-outlet empty" style="font-style:italic;opacity:0.5">Unmonitored</div>';
-          body.appendChild(spacer);
-
-          let ampsCol = document.createElement("div");
-          ampsCol.className = "crt-metric-col";
-          let ampsUnit = document.createElement("div");
-          ampsUnit.className = "crt-metric-unit";
-          ampsUnit.textContent = "AMPS";
-          let ampsVal = document.createElement("div");
-          ampsVal.className = "crt-metric-val amps";
-          ampsVal.textContent = (deltaA !== null && deltaA >= 0) ? deltaA.toFixed(2) : "--";
-          ampsCol.appendChild(ampsUnit);
-          ampsCol.appendChild(ampsVal);
-          body.appendChild(ampsCol);
-
-          let wattsCol = document.createElement("div");
-          wattsCol.className = "crt-metric-col";
-          let wattsUnit = document.createElement("div");
-          wattsUnit.className = "crt-metric-unit";
-          wattsUnit.textContent = "WATTS";
-          let wattsVal = document.createElement("div");
-          wattsVal.className = "crt-metric-val watts";
-          wattsVal.textContent = Math.round(deltaW);
-          wattsCol.appendChild(wattsUnit);
-          wattsCol.appendChild(wattsVal);
-          body.appendChild(wattsCol);
-
-          block.appendChild(body);
-          serverArea.appendChild(block);
-        }
-      }
-
       div.appendChild(serverArea);
 
-      // --- UPS IP banner (above metrics) ---
-      let upsBanner = document.createElement("div");
-      upsBanner.className = "ip-banner";
-      upsBanner.textContent = r.ups_ip ? "UPS: " + r.ups_ip : "";
-      div.appendChild(upsBanner);
-
-      // --- UPS info section (bottom of rack) ---
-      let upsInfo = document.createElement("div");
-      upsInfo.className = "ups-info";
-
-      let loadVal = (r.load_pct !== null && r.load_pct !== undefined) ? r.load_pct + "%" : "--";
-      let tempVal = "--";
-      let tempColor = "inherit";
-      if (r.temp_c !== null && r.temp_c !== undefined) {
-        tempVal = r.temp_c + "°C";
-        if (r.temp_c <= 25) tempColor = "#38bdf8";
-        else if (r.temp_c <= 35) tempColor = "#facc15";
-        else tempColor = "#ef4444";
-      }
-      let runtimeVal = (r.runtime_min !== null && r.runtime_min !== undefined) ? r.runtime_min + " min" : "--";
-
-      // Segmented load bar
-      const totalSegs = 40;
-      let litSegs = 0;
-      let segColor = "green";
-      if (r.load_pct !== null && r.load_pct !== undefined) {
-        litSegs = Math.round((r.load_pct / 100) * totalSegs);
-        if (r.bypass || r.load_pct >= 90) segColor = "red";
-        else if (r.load_pct >= 70) segColor = "amber";
-        else segColor = "green";
-      }
-
-      let segsHTML = '';
-      for (let s = 0; s < totalSegs; s++) {
-        segsHTML += '<div class="load-seg' + (s < litSegs ? ' on-' + segColor : '') + '"></div>';
-      }
-
-      // Battery (large, right side)
-      let battPct = 100; // placeholder until we poll battery capacity
-      let battColor = "#22c55e";
-      if (battPct < 30) battColor = "#ef4444";
-      else if (battPct < 60) battColor = "#f59e0b";
-      let battLabel = battPct + "%";
-
-      let metricsHTML = '<div class="ups-info-layout">';
-
-      // Top-left quadrant: Temp, Runtime
-      metricsHTML += '<div class="ups-top-left">';
-      metricsHTML += '<div class="ups-metric"><span class="ups-metric-label">Temp</span><span class="ups-metric-value" style="color:' + tempColor + '">' + tempVal + '</span></div>';
-      metricsHTML += '<div class="ups-metric"><span class="ups-metric-label">Runtime</span><span class="ups-metric-value">' + runtimeVal + '</span></div>';
-      metricsHTML += '</div>';
-
-      // Top-right quadrant: Large battery
-      metricsHTML += '<div class="ups-top-right">';
-      metricsHTML += '<div class="battery-lg">';
-      metricsHTML += '<div class="battery-lg-fill" style="width:' + battPct + '%;background:' + battColor + ';"></div>';
-      metricsHTML += '<div class="battery-lg-text">' + battLabel + '</div>';
-      metricsHTML += '</div>';
-      metricsHTML += '</div>';
-
-      // Output amps/watts row
-      let outAmps = (r.output_amps !== null && r.output_amps !== undefined) ? r.output_amps.toFixed(1) : "--";
-      let outWatts = (r.output_watts !== null && r.output_watts !== undefined) ? r.output_watts : "--";
-      metricsHTML += '<div class="ups-output-row">';
-      metricsHTML += '<div class="ups-output-metric"><span class="ups-output-val amps">' + outAmps + '</span><span class="ups-output-unit">A</span></div>';
-      metricsHTML += '<div class="ups-output-metric"><span class="ups-output-val watts">' + outWatts + '</span><span class="ups-output-unit">W</span></div>';
-      metricsHTML += '</div>';
-
-      // Bottom full-width: Load bar
-      metricsHTML += '<div class="ups-bottom-full">';
-      metricsHTML += '<div class="load-bar-row">';
-      metricsHTML += '<span class="load-pct-label">' + loadVal + '</span>';
-      metricsHTML += '<div class="load-bar-track">' + segsHTML + '</div>';
-      metricsHTML += '</div>';
-      metricsHTML += '</div>';
-
-      metricsHTML += '</div>';
-
-      upsInfo.innerHTML = metricsHTML;
-      div.appendChild(upsInfo);
-
       wrapper.appendChild(div);
-
-      // Status banner
-      let banner = document.createElement("div");
-      banner.className = "status-banner";
-      let st = (r.ups_status || "UNKNOWN").toUpperCase();
-      banner.innerText = st;
-      banner.style.background = STATUS_COLORS[st] || STATUS_COLORS["UNKNOWN"];
-      wrapper.appendChild(banner);
 
       container.appendChild(wrapper);
     });
@@ -2165,26 +1457,6 @@ def ui():
       const bh = body.clientHeight;
       const bw = body.clientWidth;
       if (bh <= 0 || bw <= 0) return;
-
-      // For "Additional PDUs" block, copy font sizes from a sibling circuit block
-      if (block.classList.contains("additional-pdu")) {
-        const sibling = block.parentElement.querySelector(".crt-block:not(.additional-pdu) .crt-metric-val");
-        const siblingUnit = block.parentElement.querySelector(".crt-block:not(.additional-pdu) .crt-metric-unit");
-        if (sibling) {
-          body.querySelectorAll(".crt-metric-val").forEach(v => v.style.fontSize = sibling.style.fontSize);
-          body.querySelectorAll(".crt-metric-unit").forEach(u => { if (siblingUnit) u.style.fontSize = siblingUnit.style.fontSize; });
-        }
-        const siblingOutlet = block.parentElement.querySelector(".crt-block:not(.additional-pdu) .crt-outlet");
-        const outletsCol = body.querySelector(".crt-outlets");
-        if (outletsCol) {
-          outletsCol.style.flex = isFill ? "3 1 0" : "5 1 0";
-          if (siblingOutlet) outletsCol.querySelectorAll(".crt-outlet").forEach(r => r.style.fontSize = siblingOutlet.style.fontSize);
-        }
-        const siblingLbl = block.parentElement.querySelector(".crt-block:not(.additional-pdu) .crt-label");
-        const lbl = block.querySelector(".crt-label");
-        if (lbl && siblingLbl) lbl.style.fontSize = siblingLbl.style.fontSize;
-        return;
-      }
 
       // Scale metric values/units based on body height, constrained by column width
       // Use same font size for both amps and watts within a circuit row
@@ -2227,28 +1499,6 @@ def ui():
       const blockH = block.clientHeight || bh;
       if (lbl) lbl.style.fontSize = Math.max(6, Math.min(bw * 0.035, blockH * 0.12)) + "px";
     });
-    document.querySelectorAll(".ups-metric").forEach(row => {
-      const w = row.clientWidth;
-      if (w <= 0) return;
-      const lbl = row.querySelector(".ups-metric-label");
-      const val = row.querySelector(".ups-metric-value");
-      if (lbl) lbl.style.fontSize = Math.max(8, w * 0.12) + "px";
-      if (val) val.style.fontSize = Math.max(8, w * 0.13) + "px";
-    });
-    // Scale UPS output amps/watts values
-    document.querySelectorAll(".ups-output-metric").forEach(metric => {
-      const parent = metric.closest(".ups-output-row");
-      if (!parent) return;
-      const pw = parent.clientWidth;
-      if (pw <= 0) return;
-      const val = metric.querySelector(".ups-output-val");
-      const unit = metric.querySelector(".ups-output-unit");
-      if (val) {
-        const text = val.textContent || "000";
-        val.style.fontSize = Math.max(10, Math.min(pw * 0.08, pw / (text.length * 1.3))) + "px";
-      }
-      if (unit) unit.style.fontSize = Math.max(8, pw * 0.03) + "px";
-    });
   }
 
   window.addEventListener("resize", () => requestAnimationFrame(autoSizeMetrics));
@@ -2279,8 +1529,9 @@ def ui():
   }
 
   // ---------------- Add Modal ----------------
-  let checkTimer = null;
-  let lastCheckToken = 0;
+  let pduCheckTimer = null;
+  let lastPduCheckToken = 0;
+  let pduOk = false;
 
   function openAdd() {
     document.getElementById("addModal").style.display = "flex";
@@ -2291,23 +1542,12 @@ def ui():
     resetAddState(false);
   }
 
-  let pduCheckTimer = null;
-  let lastPduCheckToken = 0;
-  let upsOk = false;
-  let pduOk = false;  // true when verified OR when field is empty
-
   function resetAddState(clearInputs) {
-    if (checkTimer) clearTimeout(checkTimer);
     if (pduCheckTimer) clearTimeout(pduCheckTimer);
-    checkTimer = null;
     pduCheckTimer = null;
-    lastCheckToken++;
     lastPduCheckToken++;
-    upsOk = false;
-    pduOk = true;  // empty PDU is OK
+    pduOk = false;
 
-    document.getElementById("light").classList.remove("green");
-    document.getElementById("statusText").innerText = "Waiting for UPS\u2026";
     document.getElementById("pduLight").classList.remove("green");
     document.getElementById("pduStatusText").innerText = "Waiting for PDU\u2026";
 
@@ -2315,7 +1555,6 @@ def ui():
 
     if (clearInputs) {
       document.getElementById("label").value = "";
-      document.getElementById("ip").value = "";
       document.getElementById("pduIp").value = "";
       document.getElementById("addPduNo").checked = true;
     }
@@ -2323,28 +1562,13 @@ def ui():
 
   function updateApplyBtn() {
     const btn = document.getElementById("applyBtn");
-    if (upsOk && pduOk) {
+    if (pduOk) {
       btn.disabled = false;
       btn.classList.remove("disabled");
     } else {
       btn.disabled = true;
       btn.classList.add("disabled");
     }
-  }
-
-  function setAddOk(ok, msg) {
-    const light = document.getElementById("light");
-    const txt = document.getElementById("statusText");
-    upsOk = ok;
-
-    if (ok) {
-      light.classList.add("green");
-      txt.innerText = msg || "SNMP OK";
-    } else {
-      light.classList.remove("green");
-      txt.innerText = msg || "Not connected";
-    }
-    updateApplyBtn();
   }
 
   function setPduOk(ok, msg) {
@@ -2362,34 +1586,6 @@ def ui():
     updateApplyBtn();
   }
 
-  async function checkIp(ip) {
-    const token = ++lastCheckToken;
-
-    if (!ip || ip.length < 7) {
-      setAddOk(false, "Waiting for UPS…");
-      return;
-    }
-
-    setAddOk(false, "Checking…");
-
-    try {
-      const res = await fetch("/api/check", {
-        method:"POST",
-        headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({ups_ip: ip})
-      });
-      const data = await res.json();
-
-      if (token !== lastCheckToken) return;
-
-      if (data.ok) setAddOk(true, "SNMP OK");
-      else setAddOk(false, "No SNMP response (COS65)");
-    } catch(e) {
-      if (token !== lastCheckToken) return;
-      setAddOk(false, "Check failed");
-    }
-  }
-
   document.addEventListener("DOMContentLoaded", async () => {
     try {
       const r = await fetch("/api/settings/title");
@@ -2399,19 +1595,12 @@ def ui():
     viewportStyle = localStorage.getItem("viewportStyle") || "racks";
     computeRackSize(racksCache.length);
 
-    const ipEl = document.getElementById("ip");
-    ipEl.addEventListener("input", () => {
-      const ip = ipEl.value.trim();
-      if (checkTimer) clearTimeout(checkTimer);
-      checkTimer = setTimeout(() => checkIp(ip), 900);
-    });
-
     const pduIpEl = document.getElementById("pduIp");
     pduIpEl.addEventListener("input", () => {
       const ip = pduIpEl.value.trim();
       if (pduCheckTimer) clearTimeout(pduCheckTimer);
       if (!ip) {
-        setPduOk(true, "Waiting for PDU\u2026");
+        setPduOk(false, "Waiting for PDU\u2026");
         document.getElementById("pduLight").classList.remove("green");
         return;
       }
@@ -2450,12 +1639,11 @@ def ui():
     if (btn.disabled) return;
 
     const label = document.getElementById("label").value.trim();
-    const ip = document.getElementById("ip").value.trim();
     const pduIp = document.getElementById("pduIp").value.trim();
     const hasAdditionalPdu = document.getElementById("addPduYes").checked;
 
-    if (!label || !ip) {
-      setAddOk(false, "Enter label + IP");
+    if (!label || !pduIp) {
+      setPduOk(false, "Enter label + PDU IP");
       return;
     }
 
@@ -2466,13 +1654,13 @@ def ui():
       const res = await fetch("/api/racks", {
         method:"POST",
         headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({label: label, ups_ip: ip, pdu_ip: pduIp, has_additional_pdu: hasAdditionalPdu})
+        body: JSON.stringify({label: label, pdu_ip: pduIp, has_additional_pdu: hasAdditionalPdu})
       });
       const data = await res.json();
       if (data.ok) closeAdd();
-      else setAddOk(false, data.error || "Add failed");
+      else setPduOk(false, data.error || "Add failed");
     } catch(e) {
-      setAddOk(false, "Add failed");
+      setPduOk(false, "Add failed");
     }
   }
 
@@ -2510,7 +1698,7 @@ def ui():
 
       const ipSpan = document.createElement("span");
       ipSpan.className = "remove-ip";
-      ipSpan.textContent = r.ups_ip ? ("• " + r.ups_ip) : "";
+      ipSpan.textContent = r.pdu_ip ? ("• " + r.pdu_ip) : "";
 
       left.appendChild(cb);
       left.appendChild(text);
@@ -2544,14 +1732,8 @@ def ui():
     document.getElementById("settingsModal").style.display = "flex";
     const current = document.getElementById("dashTitle").innerText || "";
     document.getElementById("titleInput").value = current.trim();
-    document.getElementById("slackTestResult").textContent = "";
     // Load viewport style
     document.getElementById(viewportStyle === "fill" ? "vpFill" : "vpRacks").checked = true;
-    try {
-      const r = await fetch("/api/settings/slack_webhook");
-      const d = await r.json();
-      document.getElementById("slackWebhookInput").value = d.url || "";
-    } catch(e) {}
     setTimeout(() => document.getElementById("titleInput").focus(), 50);
   }
 
@@ -2564,41 +1746,18 @@ def ui():
     document.title = t;
   }
 
-  async function testSlack() {
-    const url = (document.getElementById("slackWebhookInput").value || "").trim();
-    const el = document.getElementById("slackTestResult");
-    if (!url) { el.textContent = "Enter a URL first"; el.style.color = "#f87171"; return; }
-    el.textContent = "Sending..."; el.style.color = "#aaa";
-    try {
-      const res = await fetch("/api/settings/slack_test", {
-        method:"POST", headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({url: url})
-      });
-      const data = await res.json();
-      if (data.ok) { el.textContent = "Sent!"; el.style.color = "#4ade80"; }
-      else { el.textContent = data.error || "Failed"; el.style.color = "#f87171"; }
-    } catch(e) { el.textContent = "Error"; el.style.color = "#f87171"; }
-  }
-
   async function saveSettings() {
     const titleVal = (document.getElementById("titleInput").value || "").trim();
-    const webhookVal = (document.getElementById("slackWebhookInput").value || "").trim();
     const vpVal = document.querySelector('input[name="viewportStyle"]:checked').value;
     // Save viewport style to browser localStorage (per-device)
     localStorage.setItem("viewportStyle", vpVal);
     viewportStyle = vpVal;
     computeRackSize(racksCache.length);
     try {
-      const [titleRes, webhookRes] = await Promise.all([
-        fetch("/api/settings/title", {
-          method:"POST", headers:{"Content-Type":"application/json"},
-          body: JSON.stringify({title: titleVal})
-        }),
-        fetch("/api/settings/slack_webhook", {
-          method:"POST", headers:{"Content-Type":"application/json"},
-          body: JSON.stringify({url: webhookVal})
-        })
-      ]);
+      const titleRes = await fetch("/api/settings/title", {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({title: titleVal})
+      });
       const titleData = await titleRes.json();
       if (titleData && titleData.ok && titleData.title) applyTitle(titleData.title);
       closeSettings();
@@ -2609,6 +1768,5 @@ def ui():
 </body>
 </html>
 """
-    html = html.replace("__COMMUNITY__", SNMP_COMMUNITY)
     html = html.replace("__TITLE__", initial_title)
     return HTMLResponse(html)

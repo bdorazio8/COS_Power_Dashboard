@@ -13,14 +13,14 @@ UPSDash is a single-file UPS power monitoring dashboard. It polls APC UPS device
 source venv/bin/activate
 
 # Run the server (default: http://localhost:8000)
-uvicorn cos65dashboard:app --host 0.0.0.0 --port 8000
+uvicorn cospowerdash:app --host 0.0.0.0 --port 8000
 ```
 
 Requires `snmpget` and `ping` system commands to be available on the host.
 
 ## Architecture
 
-Everything lives in `cos65dashboard.py` — a single-file FastAPI application with inline HTML/CSS/JS served from the `GET /` endpoint.
+Everything lives in `cospowerdash.py` — a single-file FastAPI application with inline HTML/CSS/JS served from the `GET /` endpoint.
 
 ### Key layers (top to bottom in the file):
 
