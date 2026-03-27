@@ -18,23 +18,18 @@ DB = "upsdash.db"
 SNMP_COMMUNITY = "public"
 DEFAULT_DASH_TITLE = "Power Dashboard"
 
-# FS MPDU (enterprise 30966) per-outlet OIDs
-OID_PDU_OUTLET_CURRENT = "1.3.6.1.4.1.30966.8.1.8.1"   # .{port}.0 -> STRING (Amps)
-OID_PDU_OUTLET_POWER   = "1.3.6.1.4.1.30966.8.1.11"     # .{port}.0 -> STRING (kW)
-OID_PDU_OUTLET_STATE   = "1.3.6.1.4.1.30966.8.1.7"      # .{port}.0 -> STRING "ON "/"-- "
-OID_PDU_OUTLET_NAME    = "1.3.6.1.4.1.30966.8.1.5"      # .{port}.0 -> STRING (outlet label)
-OID_PDU_OUTLET_PF      = "1.3.6.1.4.1.30966.8.1.9"      # .{port}.0 -> STRING (power factor)
+# PDU model detection (both Server Tech and Raritan share enterprise 13742)
+OID_PDU_MODEL = "1.3.6.1.4.1.13742.6.3.2.1.1.3.1"
 
-# FS MPDU 24-port circuit mapping: physical label -> SNMP measurement index
-# Each circuit covers 4 outlets; the current/power reading lives at one SNMP index per circuit
-PDU_CIRCUITS = [
-    {"circuit": 1, "snmp_idx": 1,  "ports": [1, 2, 3, 4]},
-    {"circuit": 2, "snmp_idx": 8,  "ports": [5, 6, 7, 8]},
-    {"circuit": 3, "snmp_idx": 9,  "ports": [9, 10, 11, 12]},
-    {"circuit": 4, "snmp_idx": 16, "ports": [13, 14, 15, 16]},
-    {"circuit": 5, "snmp_idx": 17, "ports": [17, 18, 19, 20]},
-    {"circuit": 6, "snmp_idx": 24, "ports": [21, 22, 23, 24]},
-]
+# Server Tech PRO4X — single-phase, 3 breakers
+# Breaker sensors: .1.3.6.1.4.1.13742.6.6.2.3.1.4.1.{breaker}.1.{sensor_type}
+# sensor_type: 1=rmsCurrent(÷1000), 5=activePower(direct W)
+OID_STECH_BREAKER_BASE = "1.3.6.1.4.1.13742.6.6.2.3.1.4.1"
+
+# Raritan PX3 — 3-phase
+# Per-phase inlet sensors: .1.3.6.1.4.1.13742.6.5.2.4.1.4.1.1.{phase}.{sensor_type}
+# sensor_type: 1=rmsCurrent(÷1000), 5=activePower(direct W)
+OID_RARITAN_PHASE_BASE = "1.3.6.1.4.1.13742.6.5.2.4.1.4.1.1"
 
 # ----------------------------
 # Logging
@@ -107,6 +102,12 @@ def init_db():
         cur.execute("ALTER TABLE racks ADD COLUMN has_additional_pdu INTEGER DEFAULT 0")
         conn.commit()
 
+    cur.execute("PRAGMA table_info(racks)")
+    cols = [row[1] for row in cur.fetchall()]
+    if "pdu2_ip" not in cols:
+        cur.execute("ALTER TABLE racks ADD COLUMN pdu2_ip TEXT DEFAULT ''")
+        conn.commit()
+
     cur.execute(
         "UPDATE racks SET community=? WHERE community IS NULL OR TRIM(community)=''",
         (SNMP_COMMUNITY,)
@@ -146,26 +147,26 @@ def get_racks():
     conn = _connect()
     cur = conn.cursor()
     cur.execute("""
-        SELECT id,label,COALESCE(sort_order,id),COALESCE(pdu_ip,''),COALESCE(has_additional_pdu,0)
+        SELECT id,label,COALESCE(sort_order,id),COALESCE(pdu_ip,''),COALESCE(has_additional_pdu,0),COALESCE(pdu2_ip,'')
         FROM racks
         ORDER BY COALESCE(sort_order,id), id
     """)
     rows = cur.fetchall()
     conn.close()
-    return [{"id": r[0], "label": r[1], "sort_order": r[2], "pdu_ip": r[3], "has_additional_pdu": bool(r[4])} for r in rows]
+    return [{"id": r[0], "label": r[1], "sort_order": r[2], "pdu_ip": r[3], "has_additional_pdu": bool(r[4]), "pdu2_ip": r[5]} for r in rows]
 
 def _next_sort_order(cur) -> int:
     cur.execute("SELECT COALESCE(MAX(sort_order), 0) FROM racks")
     row = cur.fetchone()
     return int(row[0] or 0) + 1
 
-def add_rack(label: str, pdu_ip: str = "", has_additional_pdu: bool = False):
+def add_rack(label: str, pdu_ip: str = "", has_additional_pdu: bool = False, pdu2_ip: str = ""):
     conn = _connect()
     cur = conn.cursor()
     next_order = _next_sort_order(cur)
     cur.execute(
-        "INSERT INTO racks(label, pdu_ip, community, sort_order, has_additional_pdu) VALUES(?,?,?,?,?)",
-        (label, pdu_ip, SNMP_COMMUNITY, next_order, int(has_additional_pdu)),
+        "INSERT INTO racks(label, pdu_ip, community, sort_order, has_additional_pdu, pdu2_ip) VALUES(?,?,?,?,?,?)",
+        (label, pdu_ip, SNMP_COMMUNITY, next_order, int(has_additional_pdu), pdu2_ip),
     )
     conn.commit()
     conn.close()
@@ -367,18 +368,27 @@ def _parse_float(text: str) -> Optional[float]:
             return float(val) if val is not None else None
     return None
 
+def detect_pdu_type(ip: str) -> Optional[str]:
+    """Auto-detect PDU type by querying model string OID. Returns 'servertech', 'raritan', or None."""
+    raw = snmp_get(ip, OID_PDU_MODEL)
+    if not raw or "STRING:" not in raw:
+        return None
+    model = raw.split("STRING:", 1)[1].strip().strip('"').strip()
+    if model.upper().startswith("PRO4X"):
+        return "servertech"
+    elif model.upper().startswith("PX3"):
+        return "raritan"
+    return None
+
 # ----------------------------
 # Poll Loop / Live State
 # ----------------------------
 
 latest_status: Dict[int, Dict] = {}
 latest_systems_status: Dict[int, List[Dict]] = {}
-latest_pdu_circuits: Dict[int, List[Dict]] = {}
+latest_pdu_phases: Dict[int, List[Dict]] = {}
 
-_pdu_name_cache: Dict[str, Dict[int, str]] = {}   # pdu_ip -> {port: name}
-_pdu_name_cache_tick: Dict[str, int] = {}          # pdu_ip -> poll count at last refresh
 _poll_count = 0
-PDU_NAME_REFRESH_INTERVAL = 5  # refresh outlet names every 5 poll cycles (~10s)
 clients: Set[WebSocket] = set()
 
 def build_ordered_snapshot() -> List[Dict]:
@@ -393,10 +403,11 @@ def build_ordered_snapshot() -> List[Dict]:
         }
         status["label"] = r["label"]
         status["pdu_ip"] = r.get("pdu_ip", "")
+        status["pdu2_ip"] = r.get("pdu2_ip", "")
         status["has_additional_pdu"] = r.get("has_additional_pdu", False)
         status["sort_order"] = r.get("sort_order")
         status["systems"] = latest_systems_status.get(rid, [])
-        status["circuits"] = latest_pdu_circuits.get(rid, [])
+        status["pdus"] = latest_pdu_phases.get(rid, [])
         out.append(status)
     return out
 
@@ -431,79 +442,64 @@ async def poll_loop():
                     "sort_order": rack.get("sort_order"),
                 }
 
-            # Poll PDU circuits for racks that have a pdu_ip
+            # Poll PDUs for each rack
             global _poll_count
             _poll_count += 1
             pdu_ping_cache: Dict[str, bool] = {}
+            pdu_type_cache: Dict[str, Optional[str]] = {}
+
             for rack in racks:
                 rid = rack["id"]
-                pdu_ip = rack.get("pdu_ip", "")
-                if not pdu_ip:
-                    latest_pdu_circuits.pop(rid, None)
-                    continue
+                phases_all = []
 
-                if pdu_ip not in pdu_ping_cache:
-                    pdu_ping_cache[pdu_ip] = ping_ok(pdu_ip)
-                pdu_reachable = pdu_ping_cache[pdu_ip]
+                for pdu_key in ("pdu_ip", "pdu2_ip"):
+                    pdu_ip = rack.get(pdu_key, "")
+                    if not pdu_ip:
+                        continue
 
-                circuits = []
-                if pdu_reachable:
-                    # Fetch outlet names (cached, refresh periodically)
-                    last_tick = _pdu_name_cache_tick.get(pdu_ip, 0)
-                    if pdu_ip not in _pdu_name_cache or (_poll_count - last_tick) >= PDU_NAME_REFRESH_INTERVAL:
-                        outlet_names: Dict[int, str] = {}
-                        for port in range(1, 25):
-                            raw_name = snmp_get(pdu_ip, f"{OID_PDU_OUTLET_NAME}.{port}.0")
-                            if raw_name and "STRING:" in raw_name:
-                                name = raw_name.split("STRING:", 1)[1].strip().strip('"').strip()
-                                outlet_names[port] = name if name else f"Port {port}"
-                            else:
-                                outlet_names[port] = f"Port {port}"
-                        _pdu_name_cache[pdu_ip] = outlet_names
-                        _pdu_name_cache_tick[pdu_ip] = _poll_count
-                    outlet_names = _pdu_name_cache[pdu_ip]
+                    if pdu_ip not in pdu_ping_cache:
+                        pdu_ping_cache[pdu_ip] = ping_ok(pdu_ip)
+                    if not pdu_ping_cache[pdu_ip]:
+                        phases_all.append({"pdu_ip": pdu_ip, "pdu_key": pdu_key, "reachable": False, "phases": [
+                            {"label": "Phase " + p, "current_a": 0, "power_w": 0, "reachable": False} for p in ("A", "B", "C")
+                        ]})
+                        continue
 
-                    for cdef in PDU_CIRCUITS:
-                        idx = cdef["snmp_idx"]
-                        raw_a = snmp_get(pdu_ip, f"{OID_PDU_OUTLET_CURRENT}.{idx}.0")
-                        raw_w = snmp_get(pdu_ip, f"{OID_PDU_OUTLET_POWER}.{idx}.0")
-                        raw_pf = snmp_get(pdu_ip, f"{OID_PDU_OUTLET_PF}.{idx}.0")
-                        amps = _parse_float(raw_a) or 0.0
-                        kw = _parse_float(raw_w) or 0.0
-                        pf = _parse_float(raw_pf) or 0.0
+                    if pdu_ip not in pdu_type_cache:
+                        pdu_type_cache[pdu_ip] = detect_pdu_type(pdu_ip)
+                    pdu_type = pdu_type_cache[pdu_ip]
 
-                        port_names = []
-                        for p in cdef["ports"]:
-                            port_names.append({"port": p, "name": outlet_names.get(p, f"Port {p}")})
+                    phases = []
+                    if pdu_type == "servertech":
+                        for br_idx, phase_label in [(1, "A"), (2, "B"), (3, "C")]:
+                            raw_a = snmp_get(pdu_ip, f"{OID_STECH_BREAKER_BASE}.{br_idx}.1.1")
+                            raw_w = snmp_get(pdu_ip, f"{OID_STECH_BREAKER_BASE}.{br_idx}.1.5")
+                            amps_raw = _parse_int(raw_a) if raw_a else None
+                            watts_raw = _parse_int(raw_w) if raw_w else None
+                            amps = round(amps_raw / 1000, 2) if amps_raw is not None else 0.0
+                            watts = watts_raw if watts_raw is not None else 0
+                            phases.append({"label": "Phase " + phase_label, "current_a": amps, "power_w": watts, "reachable": True})
 
-                        circuits.append({
-                            "circuit": cdef["circuit"],
-                            "ports": cdef["ports"],
-                            "current_a": round(amps, 2),
-                            "power_w": round(kw * 1000, 1),
-                            "pf": round(pf, 2),
-                            "outlets": port_names,
-                            "reachable": True,
-                        })
-                else:
-                    for cdef in PDU_CIRCUITS:
-                        port_names = [{"port": p, "name": f"Port {p}"} for p in cdef["ports"]]
-                        circuits.append({
-                            "circuit": cdef["circuit"],
-                            "ports": cdef["ports"],
-                            "current_a": 0,
-                            "power_w": 0,
-                            "pf": 0,
-                            "outlets": port_names,
-                            "reachable": False,
-                        })
+                    elif pdu_type == "raritan":
+                        for phase_idx, phase_label in [(1, "A"), (2, "B"), (3, "C")]:
+                            raw_a = snmp_get(pdu_ip, f"{OID_RARITAN_PHASE_BASE}.{phase_idx}.1")
+                            raw_w = snmp_get(pdu_ip, f"{OID_RARITAN_PHASE_BASE}.{phase_idx}.5")
+                            amps_raw = _parse_int(raw_a) if raw_a else None
+                            watts_raw = _parse_int(raw_w) if raw_w else None
+                            amps = round(amps_raw / 1000, 2) if amps_raw is not None else 0.0
+                            watts = watts_raw if watts_raw is not None else 0
+                            phases.append({"label": "Phase " + phase_label, "current_a": amps, "power_w": watts, "reachable": True})
+                    else:
+                        phases = [{"label": "Phase " + p, "current_a": 0, "power_w": 0, "reachable": False} for p in ("A", "B", "C")]
 
-                latest_pdu_circuits[rid] = circuits
+                    phases_all.append({"pdu_ip": pdu_ip, "pdu_key": pdu_key, "reachable": True, "type": pdu_type, "phases": phases})
 
-            # Clean up circuit data for deleted racks
-            for rid in list(latest_pdu_circuits.keys()):
+                latest_pdu_phases[rid] = phases_all
+
+            # Clean up data for deleted racks
+            for rid in list(latest_pdu_phases.keys()):
                 if rid not in current_ids:
-                    latest_pdu_circuits.pop(rid, None)
+                    latest_pdu_phases.pop(rid, None)
 
             await broadcast_snapshot()
         except Exception as e:
@@ -527,6 +523,7 @@ async def startup():
 class Rack(BaseModel):
     label: str
     pdu_ip: str
+    pdu2_ip: str = ""
     has_additional_pdu: bool = False
 
 class TitlePayload(BaseModel):
@@ -548,10 +545,11 @@ class OrderPayload(BaseModel):
 def api_add_rack(r: Rack):
     label = (r.label or "").strip()
     pdu_ip = (r.pdu_ip or "").strip()
+    pdu2_ip = (r.pdu2_ip or "").strip()
     if not label or not pdu_ip:
         return {"ok": False, "error": "Missing label or PDU IP"}
-    add_rack(label, pdu_ip, r.has_additional_pdu)
-    logger.info("Rack added: %s (PDU %s, additional_pdu=%s)", label, pdu_ip, r.has_additional_pdu)
+    add_rack(label, pdu_ip, r.has_additional_pdu, pdu2_ip)
+    logger.info("Rack added: %s (PDU1 %s, PDU2 %s, additional_pdu=%s)", label, pdu_ip, pdu2_ip or "none", r.has_additional_pdu)
     return {"ok": True}
 
 @app.post("/api/delete")
@@ -575,11 +573,11 @@ def api_check_pdu_ip(data: dict):
     if not ip:
         return {"ok": False}
     if not ping_ok(ip):
-        return {"ok": False}
-    # Test reading outlet name OID to confirm it's an FS MPDU
-    test = snmp_get(ip, f"{OID_PDU_OUTLET_NAME}.1.0")
-    ok = test is not None and "STRING:" in test
-    return {"ok": ok}
+        return {"ok": False, "error": "PDU not reachable"}
+    pdu_type = detect_pdu_type(ip)
+    if pdu_type:
+        return {"ok": True, "type": pdu_type}
+    return {"ok": False, "error": "Unknown PDU type"}
 
 @app.post("/api/order")
 def api_order(p: OrderPayload):
@@ -636,15 +634,14 @@ def api_delete_system(s: SystemDeletePayload):
 @app.post("/api/systems/check")
 def api_check_pdu(data: dict):
     ip = (data.get("pdu_ip") or "").strip()
-    port = data.get("port", 1)
     if not ip:
         return {"ok": False}
     if not ping_ok(ip):
         return {"ok": False, "error": "PDU not reachable"}
-    oid = f"{OID_PDU_OUTLET_CURRENT}.{port}.0"
-    raw = snmp_get(ip, oid)
-    ok = raw is not None and "STRING:" in raw
-    return {"ok": ok}
+    pdu_type = detect_pdu_type(ip)
+    if pdu_type:
+        return {"ok": True, "type": pdu_type}
+    return {"ok": False, "error": "Unknown PDU type"}
 
 # ----------------------------
 # WebSocket
@@ -903,17 +900,6 @@ def ui():
     gap: 2px;
     overflow: hidden;
   }
-  .crt-outlets {
-    flex: 5 1 0;
-    min-width: 0;
-    display: flex;
-    flex-direction: column;
-    justify-content: center;
-    align-items: flex-start;
-    gap: 0;
-    overflow: hidden;
-    text-align: left;
-  }
   .crt-metric-col {
     flex: 3 0 0;
     min-width: 0;
@@ -941,25 +927,6 @@ def ui():
   .crt-metric-val.amps { color: #38bdf8; }
   .crt-metric-val.watts { color: #a78bfa; }
   .crt-metric-val.offline { color: rgba(255,255,255,0.3); font-size: 14px; }
-  .crt-outlet {
-    font-size: 9px;
-    line-height: 1.25;
-    color: rgba(226,232,240,0.7);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    padding-left: 4px;
-  }
-  .crt-outlet.empty {
-    opacity: 0.35;
-  }
-  .crt-port-label {
-    color: rgba(99,102,241,0.6);
-    margin-right: 4px;
-  }
-  .crt-outlet.empty .crt-port-label {
-    color: rgba(255,255,255,0.15);
-  }
   .no-pdu-msg {
     flex: 1 1 0;
     display: flex;
@@ -1148,10 +1115,16 @@ def ui():
     <div class="modal-content">
       <h3>Add Rack</h3>
       <input id="label" placeholder="Rack Label" />
-      <input id="pduIp" placeholder="PDU IP" />
+      <input id="pduIp" placeholder="PDU 1 IP" />
       <div class="status-wrap">
         <div id="pduLight" class="status-light"></div>
         <div id="pduStatusText" class="status-text">Waiting for PDU…</div>
+      </div>
+
+      <input id="pdu2Ip" placeholder="PDU 2 IP (optional)" />
+      <div class="status-wrap">
+        <div id="pdu2Light" class="status-light"></div>
+        <div id="pdu2StatusText" class="status-text">Waiting for PDU…</div>
       </div>
 
       <div style="margin:8px 0;display:flex;align-items:center;gap:12px">
@@ -1345,87 +1318,69 @@ def ui():
       label.innerText = r.label || "(no label)";
       wrapper.appendChild(label);
 
-      // IP banner
-      let pduBanner = document.createElement("div");
-      pduBanner.className = "ip-banner";
-      pduBanner.textContent = r.pdu_ip ? "PDU: " + r.pdu_ip : "\u00A0";
-      wrapper.appendChild(pduBanner);
-
-      // --- PDU circuit area (upper section) ---
+      // PDU sections
       let serverArea = document.createElement("div");
       serverArea.className = "server-area";
 
-      const circuits = r.circuits || [];
-      if (circuits.length > 0) {
-        circuits.forEach(crt => {
-          let block = document.createElement("div");
-          block.className = "crt-block";
+      const pdus = r.pdus || [];
+      if (pdus.length > 0) {
+        pdus.forEach((pdu, pduIdx) => {
+          // PDU IP banner inside rack body
+          let pduBanner = document.createElement("div");
+          pduBanner.className = "ip-banner";
+          pduBanner.textContent = pdu.pdu_ip ? ((pdu.type === "servertech" ? "Server Tech" : pdu.type === "raritan" ? "Raritan" : "PDU") + ": " + pdu.pdu_ip) : "\u00A0";
+          serverArea.appendChild(pduBanner);
 
-          let lbl = document.createElement("div");
-          lbl.className = "crt-label";
-          lbl.textContent = "CIRCUIT " + crt.circuit;
-          block.appendChild(lbl);
+          // 3 phase boxes
+          (pdu.phases || []).forEach(phase => {
+            let block = document.createElement("div");
+            block.className = "crt-block";
 
-          let body = document.createElement("div");
-          body.className = "crt-body";
+            let lbl = document.createElement("div");
+            lbl.className = "crt-label";
+            lbl.textContent = phase.label || "Phase";
+            block.appendChild(lbl);
 
-          let outlets = document.createElement("div");
-          outlets.className = "crt-outlets";
-          (crt.outlets || []).forEach(o => {
-            let row = document.createElement("div");
-            row.className = "crt-outlet";
-            let name = o.name || ("Port " + o.port);
-            let portLabel = document.createElement("span");
-            portLabel.className = "crt-port-label";
-            portLabel.textContent = "P" + o.port;
-            row.appendChild(portLabel);
-            let isDefault = /^(Output\d+|Port \d+)$/.test(name);
-            if (isDefault) {
-              row.classList.add("empty");
-              row.appendChild(document.createTextNode("(empty)"));
+            let body = document.createElement("div");
+            body.className = "crt-body";
+
+            let ampsCol = document.createElement("div");
+            ampsCol.className = "crt-metric-col";
+            let ampsUnit = document.createElement("div");
+            ampsUnit.className = "crt-metric-unit";
+            ampsUnit.textContent = "AMPS";
+            let ampsVal = document.createElement("div");
+            if (phase.reachable) {
+              ampsVal.className = "crt-metric-val amps";
+              ampsVal.textContent = phase.current_a.toFixed(2);
             } else {
-              row.appendChild(document.createTextNode(name));
+              ampsVal.className = "crt-metric-val offline";
+              ampsVal.textContent = "--";
             }
-            outlets.appendChild(row);
+            ampsCol.appendChild(ampsUnit);
+            ampsCol.appendChild(ampsVal);
+            body.appendChild(ampsCol);
+
+            let wattsCol = document.createElement("div");
+            wattsCol.className = "crt-metric-col";
+            let wattsUnit = document.createElement("div");
+            wattsUnit.className = "crt-metric-unit";
+            wattsUnit.textContent = "WATTS";
+            let wattsVal = document.createElement("div");
+            if (phase.reachable) {
+              wattsVal.className = "crt-metric-val watts";
+              wattsVal.textContent = phase.power_w.toFixed(0);
+            } else {
+              wattsVal.className = "crt-metric-val offline";
+              wattsVal.textContent = "--";
+            }
+            wattsCol.appendChild(wattsUnit);
+            wattsCol.appendChild(wattsVal);
+            body.appendChild(wattsCol);
+
+            block.appendChild(body);
+            serverArea.appendChild(block);
           });
-          body.appendChild(outlets);
-
-          let ampsCol = document.createElement("div");
-          ampsCol.className = "crt-metric-col";
-          let ampsUnit = document.createElement("div");
-          ampsUnit.className = "crt-metric-unit";
-          ampsUnit.textContent = "AMPS";
-          let ampsVal = document.createElement("div");
-          if (crt.reachable) {
-            ampsVal.className = "crt-metric-val amps";
-            ampsVal.textContent = crt.current_a.toFixed(2);
-          } else {
-            ampsVal.className = "crt-metric-val offline";
-            ampsVal.textContent = "--";
-          }
-          ampsCol.appendChild(ampsUnit);
-          ampsCol.appendChild(ampsVal);
-          body.appendChild(ampsCol);
-
-          let wattsCol = document.createElement("div");
-          wattsCol.className = "crt-metric-col";
-          let wattsUnit = document.createElement("div");
-          wattsUnit.className = "crt-metric-unit";
-          wattsUnit.textContent = "WATTS";
-          let wattsVal = document.createElement("div");
-          if (crt.reachable) {
-            wattsVal.className = "crt-metric-val watts";
-            wattsVal.textContent = crt.power_w.toFixed(0);
-          } else {
-            wattsVal.className = "crt-metric-val offline";
-            wattsVal.textContent = "--";
-          }
-          wattsCol.appendChild(wattsUnit);
-          wattsCol.appendChild(wattsVal);
-          body.appendChild(wattsCol);
-
-          block.appendChild(body);
-          serverArea.appendChild(block);
         });
       } else {
         let msg = document.createElement("div");
@@ -1435,9 +1390,7 @@ def ui():
       }
 
       div.appendChild(serverArea);
-
       wrapper.appendChild(div);
-
       container.appendChild(wrapper);
     });
 
@@ -1450,7 +1403,6 @@ def ui():
   }
 
   function autoSizeMetrics() {
-    const isFill = viewportStyle === "fill";
     document.querySelectorAll(".crt-block").forEach(block => {
       const body = block.querySelector(".crt-body");
       if (!body) return;
@@ -1458,8 +1410,6 @@ def ui():
       const bw = body.clientWidth;
       if (bh <= 0 || bw <= 0) return;
 
-      // Scale metric values/units based on body height, constrained by column width
-      // Use same font size for both amps and watts within a circuit row
       const metricCols = body.querySelectorAll(".crt-metric-col");
       let minValSize = Infinity;
       let minUnitSize = Infinity;
@@ -1483,18 +1433,6 @@ def ui():
         if (val) val.style.fontSize = minValSize + "px";
       });
 
-      // Scale outlet names based on body height
-      const outletsCol = body.querySelector(".crt-outlets");
-      if (outletsCol) {
-        outletsCol.style.flex = isFill ? "3 1 0" : "5 1 0";
-        const outletCount = Math.max(1, outletsCol.querySelectorAll(".crt-outlet").length);
-        const outletSize = Math.min(minValSize * 0.6, Math.max(7, (bh / outletCount) * 0.75)) + "px";
-        outletsCol.querySelectorAll(".crt-outlet").forEach(row => {
-          row.style.fontSize = outletSize;
-        });
-      }
-
-      // Scale circuit label based on block width and height
       const lbl = block.querySelector(".crt-label");
       const blockH = block.clientHeight || bh;
       if (lbl) lbl.style.fontSize = Math.max(6, Math.min(bw * 0.035, blockH * 0.12)) + "px";
@@ -1531,7 +1469,10 @@ def ui():
   // ---------------- Add Modal ----------------
   let pduCheckTimer = null;
   let lastPduCheckToken = 0;
+  let pdu2CheckTimer = null;
+  let lastPdu2CheckToken = 0;
   let pduOk = false;
+  let pdu2Ok = true;  // empty PDU 2 is OK
 
   function openAdd() {
     document.getElementById("addModal").style.display = "flex";
@@ -1544,25 +1485,32 @@ def ui():
 
   function resetAddState(clearInputs) {
     if (pduCheckTimer) clearTimeout(pduCheckTimer);
+    if (pdu2CheckTimer) clearTimeout(pdu2CheckTimer);
     pduCheckTimer = null;
+    pdu2CheckTimer = null;
     lastPduCheckToken++;
+    lastPdu2CheckToken++;
     pduOk = false;
+    pdu2Ok = true;
 
     document.getElementById("pduLight").classList.remove("green");
     document.getElementById("pduStatusText").innerText = "Waiting for PDU\u2026";
+    document.getElementById("pdu2Light").classList.remove("green");
+    document.getElementById("pdu2StatusText").innerText = "Waiting for PDU\u2026";
 
     updateApplyBtn();
 
     if (clearInputs) {
       document.getElementById("label").value = "";
       document.getElementById("pduIp").value = "";
+      document.getElementById("pdu2Ip").value = "";
       document.getElementById("addPduNo").checked = true;
     }
   }
 
   function updateApplyBtn() {
     const btn = document.getElementById("applyBtn");
-    if (pduOk) {
+    if (pduOk && pdu2Ok) {
       btn.disabled = false;
       btn.classList.remove("disabled");
     } else {
@@ -1575,7 +1523,6 @@ def ui():
     const light = document.getElementById("pduLight");
     const txt = document.getElementById("pduStatusText");
     pduOk = ok;
-
     if (ok) {
       light.classList.add("green");
       txt.innerText = msg || "PDU SNMP OK";
@@ -1584,6 +1531,52 @@ def ui():
       txt.innerText = msg || "Not connected";
     }
     updateApplyBtn();
+  }
+
+  function setPdu2Ok(ok, msg) {
+    const light = document.getElementById("pdu2Light");
+    const txt = document.getElementById("pdu2StatusText");
+    pdu2Ok = ok;
+    if (ok) {
+      light.classList.add("green");
+      txt.innerText = msg || "PDU SNMP OK";
+    } else {
+      light.classList.remove("green");
+      txt.innerText = msg || "Not connected";
+    }
+    updateApplyBtn();
+  }
+
+  async function checkPduIp(ip, setFn, tokenProp) {
+    const token = tokenProp === 2 ? ++lastPdu2CheckToken : ++lastPduCheckToken;
+    if (!ip || ip.length < 7) {
+      setFn(tokenProp === 2 ? true : false, "Waiting for PDU\u2026");
+      if (tokenProp === 2) document.getElementById("pdu2Light").classList.remove("green");
+      else if (tokenProp === 1) { /* PDU 1 required, keep red */ }
+      updateApplyBtn();
+      return;
+    }
+    setFn(false, "Checking\u2026");
+    try {
+      const res = await fetch("/api/check_pdu", {
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({pdu_ip: ip})
+      });
+      const data = await res.json();
+      const currentToken = tokenProp === 2 ? lastPdu2CheckToken : lastPduCheckToken;
+      if (token !== currentToken) return;
+      if (data.ok) {
+        const typeLabel = data.type === "servertech" ? "Server Tech" : data.type === "raritan" ? "Raritan" : "Unknown";
+        setFn(true, typeLabel + " detected");
+      } else {
+        setFn(false, data.error || "No PDU SNMP response");
+      }
+    } catch(e) {
+      const currentToken = tokenProp === 2 ? lastPdu2CheckToken : lastPduCheckToken;
+      if (token !== currentToken) return;
+      setFn(false, "Check failed");
+    }
   }
 
   document.addEventListener("DOMContentLoaded", async () => {
@@ -1599,40 +1592,21 @@ def ui():
     pduIpEl.addEventListener("input", () => {
       const ip = pduIpEl.value.trim();
       if (pduCheckTimer) clearTimeout(pduCheckTimer);
+      pduCheckTimer = setTimeout(() => checkPduIp(ip, setPduOk, 1), 900);
+    });
+
+    const pdu2IpEl = document.getElementById("pdu2Ip");
+    pdu2IpEl.addEventListener("input", () => {
+      const ip = pdu2IpEl.value.trim();
+      if (pdu2CheckTimer) clearTimeout(pdu2CheckTimer);
       if (!ip) {
-        setPduOk(false, "Waiting for PDU\u2026");
-        document.getElementById("pduLight").classList.remove("green");
+        setPdu2Ok(true, "Waiting for PDU\u2026");
+        document.getElementById("pdu2Light").classList.remove("green");
         return;
       }
-      pduCheckTimer = setTimeout(() => checkPduIp(ip), 900);
+      pdu2CheckTimer = setTimeout(() => checkPduIp(ip, setPdu2Ok, 2), 900);
     });
   });
-
-  async function checkPduIp(ip) {
-    const token = ++lastPduCheckToken;
-    if (!ip || ip.length < 7) {
-      pduOk = true;
-      document.getElementById("pduLight").classList.remove("green");
-      document.getElementById("pduStatusText").innerText = "Waiting for PDU\u2026";
-      updateApplyBtn();
-      return;
-    }
-    setPduOk(false, "Checking\u2026");
-    try {
-      const res = await fetch("/api/check_pdu", {
-        method:"POST",
-        headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({pdu_ip: ip})
-      });
-      const data = await res.json();
-      if (token !== lastPduCheckToken) return;
-      if (data.ok) setPduOk(true, "PDU SNMP OK");
-      else setPduOk(false, "No PDU SNMP response");
-    } catch(e) {
-      if (token !== lastPduCheckToken) return;
-      setPduOk(false, "Check failed");
-    }
-  }
 
   async function applyRack() {
     const btn = document.getElementById("applyBtn");
@@ -1640,6 +1614,7 @@ def ui():
 
     const label = document.getElementById("label").value.trim();
     const pduIp = document.getElementById("pduIp").value.trim();
+    const pdu2Ip = document.getElementById("pdu2Ip").value.trim();
     const hasAdditionalPdu = document.getElementById("addPduYes").checked;
 
     if (!label || !pduIp) {
@@ -1654,7 +1629,7 @@ def ui():
       const res = await fetch("/api/racks", {
         method:"POST",
         headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({label: label, pdu_ip: pduIp, has_additional_pdu: hasAdditionalPdu})
+        body: JSON.stringify({label: label, pdu_ip: pduIp, pdu2_ip: pdu2Ip, has_additional_pdu: hasAdditionalPdu})
       });
       const data = await res.json();
       if (data.ok) closeAdd();
@@ -1698,7 +1673,9 @@ def ui():
 
       const ipSpan = document.createElement("span");
       ipSpan.className = "remove-ip";
-      ipSpan.textContent = r.pdu_ip ? ("• " + r.pdu_ip) : "";
+      let ipText = r.pdu_ip ? ("• " + r.pdu_ip) : "";
+      if (r.pdu2_ip) ipText += " / " + r.pdu2_ip;
+      ipSpan.textContent = ipText;
 
       left.appendChild(cb);
       left.appendChild(text);
