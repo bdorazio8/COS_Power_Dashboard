@@ -171,6 +171,16 @@ def add_rack(label: str, pdu_ip: str = "", has_additional_pdu: bool = False, pdu
     conn.commit()
     conn.close()
 
+def update_rack(rack_id: int, label: str, pdu_ip: str, pdu2_ip: str = "", has_additional_pdu: bool = False):
+    conn = _connect()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE racks SET label=?, pdu_ip=?, pdu2_ip=?, has_additional_pdu=? WHERE id=?",
+        (label, pdu_ip, pdu2_ip, int(has_additional_pdu), rack_id),
+    )
+    conn.commit()
+    conn.close()
+
 def delete_racks(ids: List[int]):
     if not ids:
         return
@@ -552,6 +562,19 @@ def api_add_rack(r: Rack):
     logger.info("Rack added: %s (PDU1 %s, PDU2 %s, additional_pdu=%s)", label, pdu_ip, pdu2_ip or "none", r.has_additional_pdu)
     return {"ok": True}
 
+@app.post("/api/racks/update")
+def api_update_rack(data: dict):
+    rack_id = data.get("id")
+    label = (data.get("label") or "").strip()
+    pdu_ip = (data.get("pdu_ip") or "").strip()
+    pdu2_ip = (data.get("pdu2_ip") or "").strip()
+    has_additional_pdu = bool(data.get("has_additional_pdu", False))
+    if not rack_id or not label or not pdu_ip:
+        return {"ok": False, "error": "Missing id, label, or PDU IP"}
+    update_rack(int(rack_id), label, pdu_ip, pdu2_ip, has_additional_pdu)
+    logger.info("Rack updated: id=%s %s (PDU1 %s, PDU2 %s)", rack_id, label, pdu_ip, pdu2_ip or "none")
+    return {"ok": True}
+
 @app.post("/api/delete")
 def api_delete(data: dict):
     ids = data.get("ids", [])
@@ -857,7 +880,30 @@ def ui():
     border: 1px solid rgba(255,255,255,0.14);
     border-bottom: none;
     border-radius: 18px 18px 0 0;
+    position: relative;
   }
+
+  .edit-pen {
+    position: absolute;
+    right: 6px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 26px;
+    height: 26px;
+    border-radius: 6px;
+    border: 1px solid rgba(255,255,255,0.2);
+    background: rgba(0,0,0,0.3);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: background 150ms ease, border-color 150ms ease;
+  }
+  .edit-pen:hover {
+    background: rgba(99,102,241,0.3);
+    border-color: rgba(99,102,241,0.5);
+  }
+  .edit-pen svg { width: 14px; height: 14px; display: block; }
 
   /* PDU circuit area */
   .server-area {
@@ -1141,6 +1187,37 @@ def ui():
     </div>
   </div>
 
+  <!-- Edit Modal -->
+  <div class="modal" id="editModal">
+    <div class="modal-content">
+      <h3>Edit Rack</h3>
+      <input id="editLabel" placeholder="Rack Label" />
+      <input id="editPduIp" placeholder="PDU 1 IP" />
+      <div class="status-wrap">
+        <div id="editPduLight" class="status-light"></div>
+        <div id="editPduStatusText" class="status-text">Waiting for PDU…</div>
+      </div>
+
+      <input id="editPdu2Ip" placeholder="PDU 2 IP (optional)" />
+      <div class="status-wrap">
+        <div id="editPdu2Light" class="status-light"></div>
+        <div id="editPdu2StatusText" class="status-text">Waiting for PDU…</div>
+      </div>
+
+      <div style="margin:8px 0;display:flex;align-items:center;gap:12px">
+        <span style="color:#cbd5e1;font-weight:600;white-space:nowrap">Unmonitored PDU?</span>
+        <label style="cursor:pointer;white-space:nowrap"><input type="radio" name="editAdditionalPdu" value="no" id="editPduNo" checked /> No</label>
+        <label style="cursor:pointer;white-space:nowrap"><input type="radio" name="editAdditionalPdu" value="yes" id="editPduYes" /> Yes</label>
+      </div>
+
+      <div id="editError" style="color:#f87171;font-weight:700;font-size:13px;min-height:18px;margin-bottom:4px"></div>
+      <div class="row">
+        <button id="editApplyBtn" class="primary" onclick="applyEdit()">Save</button>
+        <button onclick="closeEdit()">Cancel</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Remove Modal -->
   <div class="modal" id="removeModal">
     <div class="modal-content">
@@ -1316,7 +1393,14 @@ def ui():
       // Label
       let label = document.createElement("div");
       label.className = "label";
-      label.innerText = r.label || "(no label)";
+      label.textContent = r.label || "(no label)";
+      if (isEdit) {
+        let pen = document.createElement("div");
+        pen.className = "edit-pen";
+        pen.innerHTML = '<svg viewBox="0 0 24 24"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z" fill="rgba(226,232,240,0.92)"/></svg>';
+        pen.onclick = (e) => { e.stopPropagation(); openEdit(r); };
+        label.appendChild(pen);
+      }
       wrapper.appendChild(label);
 
       // PDU sections
@@ -1649,6 +1733,139 @@ def ui():
       btn.classList.remove("disabled");
     }
   }
+
+  // ---------------- Edit Modal ----------------
+  let editRackId = null;
+  let editPduCheckTimer = null;
+  let editPdu2CheckTimer = null;
+  let lastEditPduToken = 0;
+  let lastEditPdu2Token = 0;
+  let editPduOk = false;
+  let editPdu2Ok = true;
+
+  function openEdit(rack) {
+    editRackId = rack.id;
+    document.getElementById("editModal").style.display = "flex";
+    document.getElementById("editLabel").value = rack.label || "";
+    document.getElementById("editPduIp").value = rack.pdu_ip || "";
+    document.getElementById("editPdu2Ip").value = rack.pdu2_ip || "";
+    document.getElementById("editError").textContent = "";
+    if (rack.has_additional_pdu) document.getElementById("editPduYes").checked = true;
+    else document.getElementById("editPduNo").checked = true;
+
+    // Run checks on existing IPs
+    editPduOk = false;
+    editPdu2Ok = true;
+    document.getElementById("editPduLight").classList.remove("green");
+    document.getElementById("editPduStatusText").innerText = "Checking\u2026";
+    document.getElementById("editPdu2Light").classList.remove("green");
+    document.getElementById("editPdu2StatusText").innerText = "Waiting for PDU\u2026";
+
+    if (rack.pdu_ip) checkEditPdu(rack.pdu_ip, 1);
+    if (rack.pdu2_ip) {
+      editPdu2Ok = false;
+      document.getElementById("editPdu2StatusText").innerText = "Checking\u2026";
+      checkEditPdu(rack.pdu2_ip, 2);
+    }
+  }
+
+  function closeEdit() {
+    document.getElementById("editModal").style.display = "none";
+    editRackId = null;
+    if (editPduCheckTimer) clearTimeout(editPduCheckTimer);
+    if (editPdu2CheckTimer) clearTimeout(editPdu2CheckTimer);
+  }
+
+  function setEditPduOk(ok, msg) {
+    const light = document.getElementById("editPduLight");
+    const txt = document.getElementById("editPduStatusText");
+    editPduOk = ok;
+    if (ok) { light.classList.add("green"); txt.innerText = msg || "PDU SNMP OK"; }
+    else { light.classList.remove("green"); txt.innerText = msg || "Not connected"; }
+    updateEditApplyBtn();
+  }
+
+  function setEditPdu2Ok(ok, msg) {
+    const light = document.getElementById("editPdu2Light");
+    const txt = document.getElementById("editPdu2StatusText");
+    editPdu2Ok = ok;
+    if (ok) { light.classList.add("green"); txt.innerText = msg || "PDU SNMP OK"; }
+    else { light.classList.remove("green"); txt.innerText = msg || "Not connected"; }
+    updateEditApplyBtn();
+  }
+
+  function updateEditApplyBtn() {
+    const btn = document.getElementById("editApplyBtn");
+    if (editPduOk && editPdu2Ok) { btn.disabled = false; btn.classList.remove("disabled"); }
+    else { btn.disabled = true; btn.classList.add("disabled"); }
+  }
+
+  async function checkEditPdu(ip, which) {
+    const token = which === 2 ? ++lastEditPdu2Token : ++lastEditPduToken;
+    const setFn = which === 2 ? setEditPdu2Ok : setEditPduOk;
+    if (!ip || ip.length < 7) {
+      if (which === 2) { setEditPdu2Ok(true, "Waiting for PDU\u2026"); document.getElementById("editPdu2Light").classList.remove("green"); }
+      else setEditPduOk(false, "Waiting for PDU\u2026");
+      return;
+    }
+    setFn(false, "Checking\u2026");
+    try {
+      const res = await fetch("/api/check_pdu", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({pdu_ip: ip}) });
+      const data = await res.json();
+      const currentToken = which === 2 ? lastEditPdu2Token : lastEditPduToken;
+      if (token !== currentToken) return;
+      if (data.ok) {
+        const typeLabel = data.type === "servertech" ? "Server Tech" : data.type === "raritan" ? "Raritan" : "Unknown";
+        setFn(true, typeLabel + " detected");
+      } else setFn(false, data.error || "No PDU SNMP response");
+    } catch(e) {
+      const currentToken = which === 2 ? lastEditPdu2Token : lastEditPduToken;
+      if (token !== currentToken) return;
+      setFn(false, "Check failed");
+    }
+  }
+
+  async function applyEdit() {
+    const btn = document.getElementById("editApplyBtn");
+    if (btn.disabled) return;
+    const label = document.getElementById("editLabel").value.trim();
+    const pduIp = document.getElementById("editPduIp").value.trim();
+    const pdu2Ip = document.getElementById("editPdu2Ip").value.trim();
+    const hasAdditionalPdu = document.getElementById("editPduYes").checked;
+    const errEl = document.getElementById("editError");
+    errEl.textContent = "";
+
+    if (!label || !pduIp) { errEl.textContent = "Enter label + PDU IP"; return; }
+
+    btn.disabled = true; btn.classList.add("disabled");
+    try {
+      const res = await fetch("/api/racks/update", {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({id: editRackId, label: label, pdu_ip: pduIp, pdu2_ip: pdu2Ip, has_additional_pdu: hasAdditionalPdu})
+      });
+      const data = await res.json();
+      if (data.ok) closeEdit();
+      else { errEl.textContent = data.error || "Update failed"; btn.disabled = false; btn.classList.remove("disabled"); }
+    } catch(e) { errEl.textContent = "Update failed"; btn.disabled = false; btn.classList.remove("disabled"); }
+  }
+
+  // Wire up edit modal input listeners
+  (function() {
+    document.addEventListener("DOMContentLoaded", () => {
+      const pduEl = document.getElementById("editPduIp");
+      pduEl.addEventListener("input", () => {
+        if (editPduCheckTimer) clearTimeout(editPduCheckTimer);
+        editPduCheckTimer = setTimeout(() => checkEditPdu(pduEl.value.trim(), 1), 900);
+      });
+      const pdu2El = document.getElementById("editPdu2Ip");
+      pdu2El.addEventListener("input", () => {
+        if (editPdu2CheckTimer) clearTimeout(editPdu2CheckTimer);
+        const ip = pdu2El.value.trim();
+        if (!ip) { setEditPdu2Ok(true, "Waiting for PDU\u2026"); document.getElementById("editPdu2Light").classList.remove("green"); return; }
+        editPdu2CheckTimer = setTimeout(() => checkEditPdu(ip, 2), 900);
+      });
+    });
+  })();
 
   // ---------------- Remove Modal ----------------
   function openRemove() {
