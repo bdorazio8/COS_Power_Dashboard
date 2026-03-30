@@ -1070,20 +1070,33 @@ def ui():
   .remove-row {
     display:flex;
     align-items:center;
-    padding: 12px 14px;
-    gap: 12px;
-    width: 100%;
-    cursor: pointer;
+    justify-content:space-between;
+    padding: 16px 14px;
+    gap: 10px;
   }
   .remove-row + .remove-row {
     border-top: 1px solid rgba(255,255,255,0.08);
   }
-  .remove-label {
-    font-weight: 800;
-    font-size: 15px;
-    color: white;
+  .remove-left {
+    display:flex;
+    align-items:center;
+    gap: 14px;
+    min-width: 0;
   }
-  .remove-checkbox { width: 20px; height: 20px; flex-shrink: 0; cursor: pointer; }
+  .remove-label {
+    font-weight: 900;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-size: 16px;
+  }
+  .remove-ip {
+    font-size: 13px;
+    opacity: 0.65;
+    margin-left: 8px;
+    font-weight: 700;
+  }
+  .remove-checkbox { width: 22px; height: 22px; }
 
   .hint {
     opacity:0.7;
@@ -1848,20 +1861,29 @@ def ui():
       const row = document.createElement("label");
       row.className = "remove-row";
 
+      const left = document.createElement("div");
+      left.className = "remove-left";
+
       const cb = document.createElement("input");
       cb.type = "checkbox";
       cb.className = "remove-checkbox";
       cb.value = String(r.id);
-      row.appendChild(cb);
 
-      let ipText = r.pdu_ip || "";
+      const text = document.createElement("div");
+      text.className = "remove-label";
+      text.textContent = r.label || "(no label)";
+
+      const ipSpan = document.createElement("span");
+      ipSpan.className = "remove-ip";
+      let ipText = r.pdu_ip ? ("• " + r.pdu_ip) : "";
       if (r.pdu2_ip) ipText += " / " + r.pdu2_ip;
+      ipSpan.textContent = ipText;
 
-      const desc = document.createElement("span");
-      desc.className = "remove-label";
-      desc.textContent = (r.label || "(no label)") + (ipText ? "  —  " + ipText : "");
-      row.appendChild(desc);
+      left.appendChild(cb);
+      left.appendChild(text);
+      text.appendChild(ipSpan);
 
+      row.appendChild(left);
       list.appendChild(row);
     });
   }
