@@ -1189,10 +1189,15 @@ def ui():
       </div>
 
       <div id="editError" style="color:#f87171;font-weight:700;font-size:13px;min-height:18px;margin-bottom:4px"></div>
-      <div class="row">
+      <div id="editButtons" class="row">
         <button id="editApplyBtn" class="primary" onclick="applyEdit()">Save</button>
-        <button class="danger" onclick="removeFromEdit()">Remove Rack</button>
+        <button class="danger" onclick="showRemoveConfirm()">Remove Rack</button>
         <button onclick="closeEdit()">Cancel</button>
+      </div>
+      <div id="editConfirm" class="row" style="display:none">
+        <span style="font-weight:700;font-size:14px;color:#f87171">Remove this rack?</span>
+        <button class="danger" onclick="confirmRemove()">Yes, Remove</button>
+        <button onclick="cancelRemoveConfirm()">No</button>
       </div>
     </div>
   </div>
@@ -1747,11 +1752,22 @@ def ui():
     editRackId = null;
     if (editPduCheckTimer) clearTimeout(editPduCheckTimer);
     if (editPdu2CheckTimer) clearTimeout(editPdu2CheckTimer);
+    document.getElementById("editConfirm").style.display = "none";
+    document.getElementById("editButtons").style.display = "flex";
   }
 
-  async function removeFromEdit() {
+  function showRemoveConfirm() {
+    document.getElementById("editButtons").style.display = "none";
+    document.getElementById("editConfirm").style.display = "flex";
+  }
+
+  function cancelRemoveConfirm() {
+    document.getElementById("editConfirm").style.display = "none";
+    document.getElementById("editButtons").style.display = "flex";
+  }
+
+  async function confirmRemove() {
     if (!editRackId) return;
-    if (!confirm("Remove this rack?")) return;
     try {
       await fetch("/api/delete", {
         method:"POST",
