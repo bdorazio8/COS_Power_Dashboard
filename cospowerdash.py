@@ -1189,15 +1189,21 @@ def ui():
       </div>
 
       <div id="editError" style="color:#f87171;font-weight:700;font-size:13px;min-height:18px;margin-bottom:4px"></div>
-      <div id="editButtons" class="row">
-        <button id="editApplyBtn" class="primary" onclick="applyEdit()">Save</button>
-        <button class="danger" onclick="showRemoveConfirm()">Remove Rack</button>
-        <button onclick="closeEdit()">Cancel</button>
+      <div id="editButtons">
+        <div class="row">
+          <button id="editApplyBtn" class="primary" onclick="applyEdit()">Save</button>
+          <button onclick="closeEdit()">Cancel</button>
+        </div>
+        <div style="margin-top:8px;border-top:1px solid rgba(255,255,255,0.08);padding-top:10px">
+          <button style="background:#475569;color:#cbd5e1;font-size:13px;padding:8px 14px;border-radius:10px;border:none;cursor:pointer;font-weight:700" onclick="showRemoveConfirm()">Remove Rack</button>
+        </div>
       </div>
-      <div id="editConfirm" class="row" style="display:none">
-        <span style="font-weight:700;font-size:14px;color:#f87171">Remove this rack?</span>
-        <button class="danger" onclick="confirmRemove()">Yes, Remove</button>
-        <button onclick="cancelRemoveConfirm()">No</button>
+      <div id="editConfirm" style="display:none;text-align:center;margin-top:8px">
+        <div style="font-weight:700;font-size:14px;color:#f87171;margin-bottom:10px">Remove this rack?</div>
+        <div class="row" style="justify-content:center">
+          <button onclick="cancelRemoveConfirm()">No, Keep</button>
+          <button class="danger" onclick="confirmRemove()">Yes, Remove</button>
+        </div>
       </div>
     </div>
   </div>
