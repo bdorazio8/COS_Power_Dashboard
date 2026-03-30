@@ -1188,13 +1188,13 @@ def ui():
         <div id="editPdu2StatusText" class="status-text">Waiting for PDU…</div>
       </div>
 
-      <div id="editError" style="color:#f87171;font-weight:700;font-size:13px;min-height:18px;margin-bottom:4px"></div>
+      <div id="editError" style="color:#f87171;font-weight:700;font-size:13px"></div>
       <div class="row">
         <button id="editApplyBtn" class="primary" onclick="applyEdit()">Save</button>
         <button onclick="closeEdit()">Cancel</button>
       </div>
       <div id="editRemoveRow" style="margin-top:8px;border-top:1px solid rgba(255,255,255,0.08);padding-top:10px">
-        <button style="background:#475569;color:#cbd5e1;font-size:13px;padding:8px 14px;border-radius:10px;border:none;cursor:pointer;font-weight:700" onclick="showRemoveConfirm()">Remove Rack</button>
+        <button style="background:rgba(220,38,38,0.2);color:rgba(248,113,113,0.7);font-size:13px;padding:8px 14px;border-radius:10px;border:1px solid rgba(220,38,38,0.15);cursor:pointer;font-weight:700" onclick="showRemoveConfirm()">Remove Rack</button>
       </div>
       <div id="editConfirm" style="display:none;margin-top:8px;border-top:1px solid rgba(255,255,255,0.08);padding-top:10px">
         <div style="font-weight:700;font-size:14px;color:#f87171;margin-bottom:10px">Remove this rack?</div>
