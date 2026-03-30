@@ -1076,19 +1076,21 @@ def ui():
   .remove-row + .remove-row {
     border-top: 1px solid rgba(255,255,255,0.08);
   }
-  .remove-text {
-    flex: 1;
-    min-width: 0;
+  .remove-info {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
   }
-  .remove-text .name {
+  .remove-name {
     font-weight: 900;
     font-size: 15px;
+    color: white;
   }
-  .remove-text .ip {
+  .remove-ip {
     font-size: 12px;
     opacity: 0.55;
     font-weight: 600;
-    margin-top: 2px;
+    color: white;
   }
   .remove-checkbox { width: 22px; height: 22px; flex-shrink: 0; }
 
@@ -1852,21 +1854,33 @@ def ui():
     }
 
     items.forEach(r => {
-      const row = document.createElement("label");
+      const row = document.createElement("div");
       row.className = "remove-row";
 
-      let ipLine = r.pdu_ip || "";
-      if (r.pdu2_ip) ipLine += " / " + r.pdu2_ip;
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.className = "remove-checkbox";
+      cb.value = String(r.id);
+      row.appendChild(cb);
 
-      const name = (r.label || "(no label)").replace(/</g, "&lt;");
-      ipLine = ipLine.replace(/</g, "&lt;");
+      const info = document.createElement("div");
+      info.className = "remove-info";
 
-      row.innerHTML = '<input type="checkbox" class="remove-checkbox" value="' + r.id + '">'
-        + '<div class="remove-text">'
-        + '<div class="name">' + name + '</div>'
-        + (ipLine ? '<div class="ip">' + ipLine + '</div>' : '')
-        + '</div>';
+      const nameEl = document.createElement("div");
+      nameEl.className = "remove-name";
+      nameEl.textContent = r.label || "(no label)";
+      info.appendChild(nameEl);
 
+      let ipText = r.pdu_ip || "";
+      if (r.pdu2_ip) ipText += " / " + r.pdu2_ip;
+      if (ipText) {
+        const ipEl = document.createElement("div");
+        ipEl.className = "remove-ip";
+        ipEl.textContent = ipText;
+        info.appendChild(ipEl);
+      }
+
+      row.appendChild(info);
       list.appendChild(row);
     });
   }
