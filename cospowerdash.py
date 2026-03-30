@@ -1071,10 +1071,15 @@ def ui():
     display:flex;
     align-items:center;
     padding: 14px 14px;
-    gap: 12px;
+    gap: 10px;
   }
   .remove-row + .remove-row {
     border-top: 1px solid rgba(255,255,255,0.08);
+  }
+  .remove-left {
+    display:flex;
+    align-items:center;
+    gap: 12px;
   }
   .remove-text {
     display: flex;
@@ -1855,6 +1860,9 @@ def ui():
       const row = document.createElement("label");
       row.className = "remove-row";
 
+      const left = document.createElement("div");
+      left.className = "remove-left";
+
       const cb = document.createElement("input");
       cb.type = "checkbox";
       cb.className = "remove-checkbox";
@@ -1877,8 +1885,10 @@ def ui():
         textWrap.appendChild(ipEl);
       }
 
-      row.appendChild(cb);
-      row.appendChild(textWrap);
+      left.appendChild(cb);
+      left.appendChild(textWrap);
+
+      row.appendChild(left);
       list.appendChild(row);
     });
   }
