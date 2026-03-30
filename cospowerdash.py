@@ -1078,8 +1078,9 @@ def ui():
   }
   .remove-left {
     display:flex;
-    align-items:center;
+    align-items:flex-start;
     gap: 12px;
+    width: 100%;
   }
   .remove-text {
     display: flex;
@@ -1095,7 +1096,7 @@ def ui():
     font-weight: 600;
     margin-top: 2px;
   }
-  .remove-checkbox { width: 22px; height: 22px; flex-shrink: 0; }
+  .remove-checkbox { width: 22px; height: 22px; min-width: 22px; max-width: 22px; flex-shrink: 0; margin-top: 2px; }
 
   .hint {
     opacity:0.7;
