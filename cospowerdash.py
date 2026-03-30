@@ -881,18 +881,17 @@ def ui():
     transform: translateY(-50%);
     width: 26px;
     height: 26px;
-    border-radius: 6px;
-    border: 1px solid rgba(255,255,255,0.2);
-    background: rgba(0,0,0,0.3);
+    background: transparent;
+    border: none;
     display: flex;
     align-items: center;
     justify-content: center;
     cursor: pointer;
-    transition: background 150ms ease, border-color 150ms ease;
+    opacity: 0.7;
+    transition: opacity 150ms ease;
   }
   .edit-pen:hover {
-    background: rgba(99,102,241,0.3);
-    border-color: rgba(99,102,241,0.5);
+    opacity: 1;
   }
   .edit-pen svg { width: 14px; height: 14px; display: block; }
 
