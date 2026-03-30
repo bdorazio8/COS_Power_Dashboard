@@ -1197,10 +1197,10 @@ def ui():
         <button style="background:rgba(220,38,38,0.2);color:rgba(248,113,113,0.7);font-size:13px;padding:8px 14px;border-radius:10px;border:1px solid rgba(220,38,38,0.15);cursor:pointer;font-weight:700" onclick="showRemoveConfirm()">Remove Rack</button>
       </div>
       <div id="editConfirm" style="display:none;margin-top:8px;border-top:1px solid rgba(255,255,255,0.08);padding-top:10px">
-        <div style="font-weight:700;font-size:14px;color:#f87171;margin-bottom:10px">Remove this rack?</div>
-        <div class="row">
-          <button onclick="cancelRemoveConfirm()">Cancel</button>
-          <button class="danger" onclick="confirmRemove()">Yes</button>
+        <div style="display:flex;align-items:center;gap:10px">
+          <span style="font-weight:700;font-size:13px;color:rgba(248,113,113,0.7)">Remove this rack?</span>
+          <button onclick="cancelRemoveConfirm()" style="font-size:13px;padding:8px 14px">Cancel</button>
+          <button class="danger" onclick="confirmRemove()" style="font-size:13px;padding:8px 14px">Yes</button>
         </div>
       </div>
     </div>
