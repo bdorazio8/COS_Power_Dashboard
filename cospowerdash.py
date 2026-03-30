@@ -1201,8 +1201,8 @@ def ui():
       <div id="editConfirm" style="display:none;text-align:center;margin-top:8px">
         <div style="font-weight:700;font-size:14px;color:#f87171;margin-bottom:10px">Remove this rack?</div>
         <div class="row" style="justify-content:center">
-          <button onclick="cancelRemoveConfirm()">No, Keep</button>
-          <button class="danger" onclick="confirmRemove()">Yes, Remove</button>
+          <button onclick="cancelRemoveConfirm()">Cancel</button>
+          <button class="danger" onclick="confirmRemove()">Yes</button>
         </div>
       </div>
     </div>
