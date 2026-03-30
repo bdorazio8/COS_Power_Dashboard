@@ -98,12 +98,6 @@ def init_db():
 
     cur.execute("PRAGMA table_info(racks)")
     cols = [row[1] for row in cur.fetchall()]
-    if "has_additional_pdu" not in cols:
-        cur.execute("ALTER TABLE racks ADD COLUMN has_additional_pdu INTEGER DEFAULT 0")
-        conn.commit()
-
-    cur.execute("PRAGMA table_info(racks)")
-    cols = [row[1] for row in cur.fetchall()]
     if "pdu2_ip" not in cols:
         cur.execute("ALTER TABLE racks ADD COLUMN pdu2_ip TEXT DEFAULT ''")
         conn.commit()
@@ -147,36 +141,36 @@ def get_racks():
     conn = _connect()
     cur = conn.cursor()
     cur.execute("""
-        SELECT id,label,COALESCE(sort_order,id),COALESCE(pdu_ip,''),COALESCE(has_additional_pdu,0),COALESCE(pdu2_ip,'')
+        SELECT id,label,COALESCE(sort_order,id),COALESCE(pdu_ip,''),COALESCE(pdu2_ip,'')
         FROM racks
         ORDER BY COALESCE(sort_order,id), id
     """)
     rows = cur.fetchall()
     conn.close()
-    return [{"id": r[0], "label": r[1], "sort_order": r[2], "pdu_ip": r[3], "has_additional_pdu": bool(r[4]), "pdu2_ip": r[5]} for r in rows]
+    return [{"id": r[0], "label": r[1], "sort_order": r[2], "pdu_ip": r[3], "pdu2_ip": r[4]} for r in rows]
 
 def _next_sort_order(cur) -> int:
     cur.execute("SELECT COALESCE(MAX(sort_order), 0) FROM racks")
     row = cur.fetchone()
     return int(row[0] or 0) + 1
 
-def add_rack(label: str, pdu_ip: str = "", has_additional_pdu: bool = False, pdu2_ip: str = ""):
+def add_rack(label: str, pdu_ip: str = "", pdu2_ip: str = ""):
     conn = _connect()
     cur = conn.cursor()
     next_order = _next_sort_order(cur)
     cur.execute(
-        "INSERT INTO racks(label, pdu_ip, community, sort_order, has_additional_pdu, pdu2_ip) VALUES(?,?,?,?,?,?)",
-        (label, pdu_ip, SNMP_COMMUNITY, next_order, int(has_additional_pdu), pdu2_ip),
+        "INSERT INTO racks(label, pdu_ip, community, sort_order, pdu2_ip) VALUES(?,?,?,?,?)",
+        (label, pdu_ip, SNMP_COMMUNITY, next_order, pdu2_ip),
     )
     conn.commit()
     conn.close()
 
-def update_rack(rack_id: int, label: str, pdu_ip: str, pdu2_ip: str = "", has_additional_pdu: bool = False):
+def update_rack(rack_id: int, label: str, pdu_ip: str, pdu2_ip: str = ""):
     conn = _connect()
     cur = conn.cursor()
     cur.execute(
-        "UPDATE racks SET label=?, pdu_ip=?, pdu2_ip=?, has_additional_pdu=? WHERE id=?",
-        (label, pdu_ip, pdu2_ip, int(has_additional_pdu), rack_id),
+        "UPDATE racks SET label=?, pdu_ip=?, pdu2_ip=? WHERE id=?",
+        (label, pdu_ip, pdu2_ip, rack_id),
     )
     conn.commit()
     conn.close()
@@ -414,7 +408,6 @@ def build_ordered_snapshot() -> List[Dict]:
         status["label"] = r["label"]
         status["pdu_ip"] = r.get("pdu_ip", "")
         status["pdu2_ip"] = r.get("pdu2_ip", "")
-        status["has_additional_pdu"] = r.get("has_additional_pdu", False)
         status["sort_order"] = r.get("sort_order")
         status["systems"] = latest_systems_status.get(rid, [])
         status["pdus"] = latest_pdu_phases.get(rid, [])
@@ -534,7 +527,6 @@ class Rack(BaseModel):
     label: str
     pdu_ip: str
     pdu2_ip: str = ""
-    has_additional_pdu: bool = False
 
 class TitlePayload(BaseModel):
     title: str
@@ -558,8 +550,8 @@ def api_add_rack(r: Rack):
     pdu2_ip = (r.pdu2_ip or "").strip()
     if not label or not pdu_ip:
         return {"ok": False, "error": "Missing label or PDU IP"}
-    add_rack(label, pdu_ip, r.has_additional_pdu, pdu2_ip)
-    logger.info("Rack added: %s (PDU1 %s, PDU2 %s, additional_pdu=%s)", label, pdu_ip, pdu2_ip or "none", r.has_additional_pdu)
+    add_rack(label, pdu_ip, pdu2_ip)
+    logger.info("Rack added: %s (PDU1 %s, PDU2 %s)", label, pdu_ip, pdu2_ip or "none")
     return {"ok": True}
 
 @app.post("/api/racks/update")
@@ -568,10 +560,9 @@ def api_update_rack(data: dict):
     label = (data.get("label") or "").strip()
     pdu_ip = (data.get("pdu_ip") or "").strip()
     pdu2_ip = (data.get("pdu2_ip") or "").strip()
-    has_additional_pdu = bool(data.get("has_additional_pdu", False))
     if not rack_id or not label or not pdu_ip:
         return {"ok": False, "error": "Missing id, label, or PDU IP"}
-    update_rack(int(rack_id), label, pdu_ip, pdu2_ip, has_additional_pdu)
+    update_rack(int(rack_id), label, pdu_ip, pdu2_ip)
     logger.info("Rack updated: id=%s %s (PDU1 %s, PDU2 %s)", rack_id, label, pdu_ip, pdu2_ip or "none")
     return {"ok": True}
 
@@ -1079,9 +1070,8 @@ def ui():
   .remove-row {
     display:flex;
     align-items:center;
-    justify-content:space-between;
-    padding: 16px 14px;
-    gap: 10px;
+    padding: 12px 14px;
+    gap: 12px;
   }
   .remove-row + .remove-row {
     border-top: 1px solid rgba(255,255,255,0.08);
@@ -1089,23 +1079,31 @@ def ui():
   .remove-left {
     display:flex;
     align-items:center;
-    gap: 14px;
+    gap: 12px;
+    min-width: 0;
+    flex: 1;
+  }
+  .remove-info {
+    display: flex;
+    flex-direction: column;
     min-width: 0;
   }
   .remove-label {
     font-weight: 900;
+    font-size: 16px;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    font-size: clamp(18px, 1.7vw, 24px);
   }
   .remove-ip {
-    font-size: clamp(16px, 1.5vw, 22px);
-    opacity: 0.75;
-    margin-left: 10px;
-    font-weight: 800;
+    font-size: 13px;
+    opacity: 0.6;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
-  .remove-checkbox { width: 22px; height: 22px; }
+  .remove-checkbox { width: 20px; height: 20px; flex-shrink: 0; }
 
   .hint {
     opacity:0.7;
@@ -1173,12 +1171,6 @@ def ui():
         <div id="pdu2StatusText" class="status-text">Waiting for PDU…</div>
       </div>
 
-      <div style="margin:8px 0;display:flex;align-items:center;gap:12px">
-        <span style="color:#cbd5e1;font-weight:600;white-space:nowrap">Unmonitored PDU?</span>
-        <label style="cursor:pointer;white-space:nowrap"><input type="radio" name="additionalPdu" value="no" id="addPduNo" checked /> No</label>
-        <label style="cursor:pointer;white-space:nowrap"><input type="radio" name="additionalPdu" value="yes" id="addPduYes" /> Yes</label>
-      </div>
-
       <div id="addError" style="color:#f87171;font-weight:700;font-size:13px;min-height:18px;margin-bottom:4px"></div>
       <div class="row">
         <button id="applyBtn" class="primary disabled" disabled onclick="applyRack()">Apply</button>
@@ -1202,12 +1194,6 @@ def ui():
       <div class="status-wrap">
         <div id="editPdu2Light" class="status-light"></div>
         <div id="editPdu2StatusText" class="status-text">Waiting for PDU…</div>
-      </div>
-
-      <div style="margin:8px 0;display:flex;align-items:center;gap:12px">
-        <span style="color:#cbd5e1;font-weight:600;white-space:nowrap">Unmonitored PDU?</span>
-        <label style="cursor:pointer;white-space:nowrap"><input type="radio" name="editAdditionalPdu" value="no" id="editPduNo" checked /> No</label>
-        <label style="cursor:pointer;white-space:nowrap"><input type="radio" name="editAdditionalPdu" value="yes" id="editPduYes" /> Yes</label>
       </div>
 
       <div id="editError" style="color:#f87171;font-weight:700;font-size:13px;min-height:18px;margin-bottom:4px"></div>
@@ -1590,7 +1576,6 @@ def ui():
       document.getElementById("label").value = "";
       document.getElementById("pduIp").value = "";
       document.getElementById("pdu2Ip").value = "";
-      document.getElementById("addPduNo").checked = true;
     }
   }
 
@@ -1701,7 +1686,6 @@ def ui():
     const label = document.getElementById("label").value.trim();
     const pduIp = document.getElementById("pduIp").value.trim();
     const pdu2Ip = document.getElementById("pdu2Ip").value.trim();
-    const hasAdditionalPdu = document.getElementById("addPduYes").checked;
 
     const errEl = document.getElementById("addError");
     errEl.textContent = "";
@@ -1718,7 +1702,7 @@ def ui():
       const res = await fetch("/api/racks", {
         method:"POST",
         headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({label: label, pdu_ip: pduIp, pdu2_ip: pdu2Ip, has_additional_pdu: hasAdditionalPdu})
+        body: JSON.stringify({label: label, pdu_ip: pduIp, pdu2_ip: pdu2Ip})
       });
       const data = await res.json();
       if (data.ok) closeAdd();
@@ -1750,8 +1734,6 @@ def ui():
     document.getElementById("editPduIp").value = rack.pdu_ip || "";
     document.getElementById("editPdu2Ip").value = rack.pdu2_ip || "";
     document.getElementById("editError").textContent = "";
-    if (rack.has_additional_pdu) document.getElementById("editPduYes").checked = true;
-    else document.getElementById("editPduNo").checked = true;
 
     // Run checks on existing IPs
     editPduOk = false;
@@ -1831,7 +1813,6 @@ def ui():
     const label = document.getElementById("editLabel").value.trim();
     const pduIp = document.getElementById("editPduIp").value.trim();
     const pdu2Ip = document.getElementById("editPdu2Ip").value.trim();
-    const hasAdditionalPdu = document.getElementById("editPduYes").checked;
     const errEl = document.getElementById("editError");
     errEl.textContent = "";
 
@@ -1841,7 +1822,7 @@ def ui():
     try {
       const res = await fetch("/api/racks/update", {
         method:"POST", headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({id: editRackId, label: label, pdu_ip: pduIp, pdu2_ip: pdu2Ip, has_additional_pdu: hasAdditionalPdu})
+        body: JSON.stringify({id: editRackId, label: label, pdu_ip: pduIp, pdu2_ip: pdu2Ip})
       });
       const data = await res.json();
       if (data.ok) closeEdit();
@@ -1895,19 +1876,25 @@ def ui():
       cb.className = "remove-checkbox";
       cb.value = String(r.id);
 
+      const info = document.createElement("div");
+      info.className = "remove-info";
+
       const text = document.createElement("div");
       text.className = "remove-label";
       text.textContent = r.label || "(no label)";
+      info.appendChild(text);
 
-      const ipSpan = document.createElement("span");
-      ipSpan.className = "remove-ip";
-      let ipText = r.pdu_ip ? ("• " + r.pdu_ip) : "";
+      let ipText = r.pdu_ip || "";
       if (r.pdu2_ip) ipText += " / " + r.pdu2_ip;
-      ipSpan.textContent = ipText;
+      if (ipText) {
+        const ipDiv = document.createElement("div");
+        ipDiv.className = "remove-ip";
+        ipDiv.textContent = ipText;
+        info.appendChild(ipDiv);
+      }
 
       left.appendChild(cb);
-      left.appendChild(text);
-      text.appendChild(ipSpan);
+      left.appendChild(info);
 
       row.appendChild(left);
       list.appendChild(row);
