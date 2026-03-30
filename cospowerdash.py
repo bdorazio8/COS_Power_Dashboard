@@ -1070,29 +1070,30 @@ def ui():
   .remove-row {
     display:flex;
     align-items:center;
-    padding: 12px 14px;
-    gap: 12px;
+    justify-content:space-between;
+    padding: 16px 14px;
+    gap: 10px;
   }
   .remove-row + .remove-row {
     border-top: 1px solid rgba(255,255,255,0.08);
   }
-  .remove-info {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
+  .remove-left {
+    display:flex;
+    align-items:center;
+    gap: 14px;
+    min-width: 0;
   }
-  .remove-name {
+  .remove-label {
     font-weight: 900;
-    font-size: 15px;
-    color: white;
+    font-size: 16px;
   }
   .remove-ip {
-    font-size: 12px;
-    opacity: 0.55;
-    font-weight: 600;
-    color: white;
+    font-size: 13px;
+    opacity: 0.65;
+    margin-left: 8px;
+    font-weight: 700;
   }
-  .remove-checkbox { width: 22px; height: 22px; flex-shrink: 0; }
+  .remove-checkbox { width: 22px; height: 22px; }
 
   .hint {
     opacity:0.7;
@@ -1854,33 +1855,32 @@ def ui():
     }
 
     items.forEach(r => {
-      const row = document.createElement("div");
+      const row = document.createElement("label");
       row.className = "remove-row";
+
+      const left = document.createElement("div");
+      left.className = "remove-left";
 
       const cb = document.createElement("input");
       cb.type = "checkbox";
       cb.className = "remove-checkbox";
       cb.value = String(r.id);
-      row.appendChild(cb);
 
-      const info = document.createElement("div");
-      info.className = "remove-info";
+      const text = document.createElement("div");
+      text.className = "remove-label";
+      text.textContent = r.label || "(no label)";
 
-      const nameEl = document.createElement("div");
-      nameEl.className = "remove-name";
-      nameEl.textContent = r.label || "(no label)";
-      info.appendChild(nameEl);
-
-      let ipText = r.pdu_ip || "";
+      const ipSpan = document.createElement("span");
+      ipSpan.className = "remove-ip";
+      let ipText = r.pdu_ip ? ("• " + r.pdu_ip) : "";
       if (r.pdu2_ip) ipText += " / " + r.pdu2_ip;
-      if (ipText) {
-        const ipEl = document.createElement("div");
-        ipEl.className = "remove-ip";
-        ipEl.textContent = ipText;
-        info.appendChild(ipEl);
-      }
+      ipSpan.textContent = ipText;
 
-      row.appendChild(info);
+      left.appendChild(cb);
+      left.appendChild(text);
+      text.appendChild(ipSpan);
+
+      row.appendChild(left);
       list.appendChild(row);
     });
   }
