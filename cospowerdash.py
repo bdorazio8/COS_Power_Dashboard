@@ -1083,15 +1083,19 @@ def ui():
     gap: 14px;
     min-width: 0;
   }
+  .remove-text {
+    display: flex;
+    flex-direction: column;
+  }
   .remove-label {
     font-weight: 900;
     font-size: 16px;
   }
   .remove-ip {
-    font-size: 13px;
-    opacity: 0.65;
-    margin-left: 8px;
-    font-weight: 700;
+    font-size: 12px;
+    opacity: 0.55;
+    font-weight: 600;
+    margin-top: 2px;
   }
   .remove-checkbox { width: 22px; height: 22px; }
 
@@ -1866,19 +1870,25 @@ def ui():
       cb.className = "remove-checkbox";
       cb.value = String(r.id);
 
-      const text = document.createElement("div");
-      text.className = "remove-label";
-      text.textContent = r.label || "(no label)";
+      const textWrap = document.createElement("div");
+      textWrap.className = "remove-text";
 
-      const ipSpan = document.createElement("span");
-      ipSpan.className = "remove-ip";
-      let ipText = r.pdu_ip ? ("• " + r.pdu_ip) : "";
+      const nameEl = document.createElement("div");
+      nameEl.className = "remove-label";
+      nameEl.textContent = r.label || "(no label)";
+      textWrap.appendChild(nameEl);
+
+      let ipText = r.pdu_ip || "";
       if (r.pdu2_ip) ipText += " / " + r.pdu2_ip;
-      ipSpan.textContent = ipText;
+      if (ipText) {
+        const ipEl = document.createElement("div");
+        ipEl.className = "remove-ip";
+        ipEl.textContent = ipText;
+        textWrap.appendChild(ipEl);
+      }
 
       left.appendChild(cb);
-      left.appendChild(text);
-      text.appendChild(ipSpan);
+      left.appendChild(textWrap);
 
       row.appendChild(left);
       list.appendChild(row);
