@@ -1070,33 +1070,27 @@ def ui():
   .remove-row {
     display:flex;
     align-items:center;
-    justify-content:space-between;
-    padding: 16px 14px;
-    gap: 10px;
+    padding: 12px 14px;
+    gap: 12px;
   }
   .remove-row + .remove-row {
     border-top: 1px solid rgba(255,255,255,0.08);
   }
-  .remove-left {
-    display:flex;
-    align-items:center;
-    gap: 14px;
+  .remove-text {
+    flex: 1;
     min-width: 0;
   }
-  .remove-label {
+  .remove-text .name {
     font-weight: 900;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    font-size: 16px;
+    font-size: 15px;
   }
-  .remove-ip {
-    font-size: 13px;
-    opacity: 0.65;
-    margin-left: 8px;
-    font-weight: 700;
+  .remove-text .ip {
+    font-size: 12px;
+    opacity: 0.55;
+    font-weight: 600;
+    margin-top: 2px;
   }
-  .remove-checkbox { width: 22px; height: 22px; }
+  .remove-checkbox { width: 22px; height: 22px; flex-shrink: 0; }
 
   .hint {
     opacity:0.7;
@@ -1861,29 +1855,18 @@ def ui():
       const row = document.createElement("label");
       row.className = "remove-row";
 
-      const left = document.createElement("div");
-      left.className = "remove-left";
+      let ipLine = r.pdu_ip || "";
+      if (r.pdu2_ip) ipLine += " / " + r.pdu2_ip;
 
-      const cb = document.createElement("input");
-      cb.type = "checkbox";
-      cb.className = "remove-checkbox";
-      cb.value = String(r.id);
+      const name = (r.label || "(no label)").replace(/</g, "&lt;");
+      ipLine = ipLine.replace(/</g, "&lt;");
 
-      const text = document.createElement("div");
-      text.className = "remove-label";
-      text.textContent = r.label || "(no label)";
+      row.innerHTML = '<input type="checkbox" class="remove-checkbox" value="' + r.id + '">'
+        + '<div class="remove-text">'
+        + '<div class="name">' + name + '</div>'
+        + (ipLine ? '<div class="ip">' + ipLine + '</div>' : '')
+        + '</div>';
 
-      const ipSpan = document.createElement("span");
-      ipSpan.className = "remove-ip";
-      let ipText = r.pdu_ip ? ("• " + r.pdu_ip) : "";
-      if (r.pdu2_ip) ipText += " / " + r.pdu2_ip;
-      ipSpan.textContent = ipText;
-
-      left.appendChild(cb);
-      left.appendChild(text);
-      text.appendChild(ipSpan);
-
-      row.appendChild(left);
       list.appendChild(row);
     });
   }
