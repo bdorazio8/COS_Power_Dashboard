@@ -1372,13 +1372,11 @@ def ui():
       let label = document.createElement("div");
       label.className = "label";
       label.textContent = r.label || "(no label)";
-      if (isEdit) {
-        let pen = document.createElement("div");
-        pen.className = "edit-pen";
-        pen.innerHTML = '<svg viewBox="0 0 24 24"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z" fill="rgba(226,232,240,0.92)"/></svg>';
-        pen.onclick = (e) => { e.stopPropagation(); openEdit(r); };
-        label.appendChild(pen);
-      }
+      let pen = document.createElement("div");
+      pen.className = "edit-pen";
+      pen.innerHTML = '<svg viewBox="0 0 24 24"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z" fill="rgba(226,232,240,0.92)"/></svg>';
+      pen.onclick = (e) => { e.stopPropagation(); openEdit(r); };
+      label.appendChild(pen);
       wrapper.appendChild(label);
 
       // PDU sections
