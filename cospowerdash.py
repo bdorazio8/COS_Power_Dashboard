@@ -1191,6 +1191,7 @@ def ui():
       <div id="editError" style="color:#f87171;font-weight:700;font-size:13px;min-height:18px;margin-bottom:4px"></div>
       <div class="row">
         <button id="editApplyBtn" class="primary" onclick="applyEdit()">Save</button>
+        <button class="danger" onclick="removeFromEdit()">Remove Rack</button>
         <button onclick="closeEdit()">Cancel</button>
       </div>
     </div>
@@ -1746,6 +1747,19 @@ def ui():
     editRackId = null;
     if (editPduCheckTimer) clearTimeout(editPduCheckTimer);
     if (editPdu2CheckTimer) clearTimeout(editPdu2CheckTimer);
+  }
+
+  async function removeFromEdit() {
+    if (!editRackId) return;
+    if (!confirm("Remove this rack?")) return;
+    try {
+      await fetch("/api/delete", {
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ids: [editRackId]})
+      });
+    } catch(e) {}
+    closeEdit();
   }
 
   function setEditPduOk(ok, msg) {
