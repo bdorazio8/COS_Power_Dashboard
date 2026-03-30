@@ -1072,6 +1072,7 @@ def ui():
     align-items:center;
     padding: 12px 14px;
     gap: 12px;
+    width: 100%;
   }
   .remove-row + .remove-row {
     border-top: 1px solid rgba(255,255,255,0.08);
@@ -1087,6 +1088,7 @@ def ui():
     display: flex;
     flex-direction: column;
     min-width: 0;
+    flex: 1;
   }
   .remove-label {
     font-weight: 900;
