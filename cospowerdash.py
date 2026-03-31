@@ -1636,7 +1636,8 @@ def ui():
       <h3>Reports</h3>
       <div id="reportsNotConfigured" style="display:none;padding:12px 0">
         <div style="font-weight:700;color:#f87171;margin-bottom:8px">OME connection not configured.</div>
-        <div style="opacity:0.7;font-size:13px">Go to Settings and configure the OME connection first.</div>
+        <div style="opacity:0.7;font-size:13px;margin-bottom:12px">Go to Settings and configure the OME connection first.</div>
+        <button onclick="closeReports()">OK</button>
       </div>
       <div id="reportsSelector" style="display:none">
         <div style="margin-bottom:8px"><span style="color:#cbd5e1;font-weight:600">Select Report:</span></div>
