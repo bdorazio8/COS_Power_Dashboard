@@ -145,6 +145,17 @@ def init_db():
     """)
     conn.commit()
 
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS servers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            rack_id INTEGER NOT NULL,
+            idrac_ip TEXT NOT NULL,
+            name TEXT NOT NULL DEFAULT '',
+            sort_order INTEGER NOT NULL DEFAULT 0
+        )
+    """)
+    conn.commit()
+
     conn.close()
 
 def get_racks():
@@ -310,6 +321,66 @@ def delete_systems_for_rack(rack_id: int):
     conn = _connect()
     cur = conn.cursor()
     cur.execute("DELETE FROM systems WHERE rack_id=?", (rack_id,))
+    conn.commit()
+    conn.close()
+
+# ----------------------------
+# Servers DB helpers
+# ----------------------------
+
+def get_servers_for_rack(rack_id: int) -> List[Dict]:
+    conn = _connect()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT id, rack_id, idrac_ip, name, sort_order "
+        "FROM servers WHERE rack_id=? ORDER BY sort_order, id", (rack_id,)
+    )
+    rows = cur.fetchall()
+    conn.close()
+    return [{"id": r[0], "rack_id": r[1], "idrac_ip": r[2], "name": r[3], "sort_order": r[4]} for r in rows]
+
+def get_all_servers() -> Dict[int, List[Dict]]:
+    conn = _connect()
+    cur = conn.cursor()
+    cur.execute("SELECT id, rack_id, idrac_ip, name, sort_order FROM servers ORDER BY sort_order, id")
+    rows = cur.fetchall()
+    conn.close()
+    grouped: Dict[int, List[Dict]] = {}
+    for r in rows:
+        entry = {"id": r[0], "rack_id": r[1], "idrac_ip": r[2], "name": r[3], "sort_order": r[4]}
+        grouped.setdefault(r[1], []).append(entry)
+    return grouped
+
+def add_server(rack_id: int, idrac_ip: str, name: str = "") -> int:
+    conn = _connect()
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM servers WHERE rack_id=?", (rack_id,))
+    count = cur.fetchone()[0]
+    if count >= 20:
+        conn.close()
+        return -1
+    cur.execute("SELECT COALESCE(MAX(sort_order),0) FROM servers WHERE rack_id=?", (rack_id,))
+    next_order = cur.fetchone()[0] + 1
+    cur.execute(
+        "INSERT INTO servers(rack_id, idrac_ip, name, sort_order) VALUES(?,?,?,?)",
+        (rack_id, idrac_ip, name, next_order),
+    )
+    conn.commit()
+    new_id = cur.lastrowid
+    conn.close()
+    return new_id
+
+def delete_server(server_id: int):
+    conn = _connect()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM servers WHERE id=?", (server_id,))
+    conn.commit()
+    conn.close()
+
+def delete_servers_for_rack(rack_id: int):
+    conn = _connect()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM servers WHERE rack_id=?", (rack_id,))
     conn.commit()
     conn.close()
 
@@ -605,6 +676,7 @@ def api_delete(data: dict):
         latest_status.pop(rid, None)
         latest_systems_status.pop(rid, None)
         delete_systems_for_rack(rid)
+        delete_servers_for_rack(rid)
     logger.info("Racks deleted: %s", ids_int)
     return {"ok": True}
 
@@ -715,6 +787,41 @@ def api_check_pdu(data: dict):
     if pdu_type:
         return {"ok": True, "type": pdu_type}
     return {"ok": False, "error": "Unknown PDU type"}
+
+# ----------------------------
+# Servers API
+# ----------------------------
+
+class ServerPayload(BaseModel):
+    rack_id: int
+    idrac_ip: str
+    name: str = ""
+
+class ServerDeletePayload(BaseModel):
+    id: int
+
+@app.post("/api/servers")
+def api_add_server(s: ServerPayload):
+    idrac_ip = (s.idrac_ip or "").strip()
+    name = (s.name or "").strip()
+    if not idrac_ip:
+        return {"ok": False, "error": "Missing iDRAC IP"}
+    new_id = add_server(s.rack_id, idrac_ip, name)
+    if new_id == -1:
+        return {"ok": False, "error": "Maximum 20 servers per rack"}
+    logger.info("Server added: %s (%s) on rack %d", name or idrac_ip, idrac_ip, s.rack_id)
+    return {"ok": True, "id": new_id}
+
+@app.post("/api/servers/delete")
+def api_delete_server(s: ServerDeletePayload):
+    delete_server(s.id)
+    logger.info("Server deleted: id=%d", s.id)
+    return {"ok": True}
+
+@app.get("/api/servers/{rack_id}")
+def api_get_servers(rack_id: int):
+    servers = get_servers_for_rack(rack_id)
+    return {"ok": True, "servers": servers}
 
 # ----------------------------
 # WebSocket
@@ -1245,6 +1352,16 @@ def ui():
       <div class="status-wrap">
         <div id="editPdu2Light" class="status-light"></div>
         <div id="editPdu2StatusText" class="status-text">Waiting for PDU…</div>
+      </div>
+
+      <div style="margin-top:12px;border-top:1px solid rgba(255,255,255,0.08);padding-top:12px">
+        <div style="margin-bottom:6px"><span style="color:#cbd5e1;font-weight:600">Servers (iDRAC):</span></div>
+        <div id="editServerList" style="margin-bottom:8px"></div>
+        <div style="display:flex;gap:6px;align-items:center">
+          <input id="editServerIp" placeholder="iDRAC IP" style="flex:1;margin-bottom:0" />
+          <button onclick="addServerToRack()" style="white-space:nowrap;padding:10px 14px;font-size:13px;background:rgba(37,99,235,0.3);color:#93c5fd;border:1px solid rgba(37,99,235,0.3);border-radius:10px;cursor:pointer;font-weight:700">Add</button>
+        </div>
+        <div id="editServerError" style="color:#f87171;font-weight:700;font-size:13px"></div>
       </div>
 
       <div id="editError" style="color:#f87171;font-weight:700;font-size:13px"></div>
@@ -1824,6 +1941,7 @@ def ui():
       document.getElementById("editPdu2StatusText").innerText = "Checking\u2026";
       checkEditPdu(rack.pdu2_ip, 2);
     }
+    loadServersForEdit(rack.id);
   }
 
   function closeEdit() {
@@ -1946,6 +2064,59 @@ def ui():
       });
     });
   })();
+
+  // ---------------- Edit Modal: Server Management ----------------
+  async function loadServersForEdit(rackId) {
+    try {
+      const res = await fetch("/api/servers/" + rackId);
+      const data = await res.json();
+      if (data.ok) renderEditServerList(data.servers || []);
+    } catch(e) {}
+  }
+
+  function renderEditServerList(servers) {
+    const list = document.getElementById("editServerList");
+    list.innerHTML = "";
+    if (servers.length === 0) {
+      list.innerHTML = '<div style="opacity:0.4;font-size:12px;font-weight:600">No servers added</div>';
+      return;
+    }
+    servers.forEach(s => {
+      const row = document.createElement("div");
+      row.style.cssText = "display:flex;align-items:center;justify-content:space-between;padding:6px 8px;background:rgba(15,23,42,0.55);border-radius:8px;margin-bottom:4px;border:1px solid rgba(255,255,255,0.06)";
+      const label = document.createElement("span");
+      label.style.cssText = "font-weight:700;font-size:13px";
+      label.textContent = s.idrac_ip;
+      const removeBtn = document.createElement("button");
+      removeBtn.style.cssText = "background:rgba(220,38,38,0.2);color:rgba(248,113,113,0.7);font-size:11px;padding:4px 10px;border-radius:8px;border:1px solid rgba(220,38,38,0.15);cursor:pointer;font-weight:700";
+      removeBtn.textContent = "Remove";
+      removeBtn.onclick = async () => {
+        await fetch("/api/servers/delete", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id:s.id})});
+        loadServersForEdit(editRackId);
+      };
+      row.appendChild(label);
+      row.appendChild(removeBtn);
+      list.appendChild(row);
+    });
+  }
+
+  async function addServerToRack() {
+    const ip = document.getElementById("editServerIp").value.trim();
+    const errEl = document.getElementById("editServerError");
+    errEl.textContent = "";
+    if (!ip) { errEl.textContent = "Enter iDRAC IP"; return; }
+    try {
+      const res = await fetch("/api/servers", {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({rack_id: editRackId, idrac_ip: ip})
+      });
+      const data = await res.json();
+      if (data.ok) {
+        document.getElementById("editServerIp").value = "";
+        loadServersForEdit(editRackId);
+      } else errEl.textContent = data.error || "Add failed";
+    } catch(e) { errEl.textContent = "Add failed"; }
+  }
 
   // ---------------- Remove Modal ----------------
   function openRemove() {
