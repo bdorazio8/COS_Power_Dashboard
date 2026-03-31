@@ -1632,7 +1632,7 @@ def ui():
 
   <!-- Reports Modal -->
   <div class="modal" id="reportsModal">
-    <div class="modal-content" style="width:min(700px, 95vw);max-height:85vh;display:flex;flex-direction:column">
+    <div id="reportsContent" class="modal-content" style="max-height:85vh;display:flex;flex-direction:column">
       <h3>Reports</h3>
       <div id="reportsNotConfigured" style="display:none;padding:12px 0">
         <div style="font-weight:700;color:#f87171;margin-bottom:8px">OME connection not configured.</div>
@@ -2646,11 +2646,13 @@ def ui():
       });
       body.appendChild(tr);
     });
+    document.getElementById("reportsContent").style.width = "min(900px, 95vw)";
     document.getElementById("reportsResults").style.display = "block";
     document.getElementById("reportsActions").style.display = "block";
   }
 
   function backToReportSelect() {
+    document.getElementById("reportsContent").style.width = "";
     document.getElementById("reportsResults").style.display = "none";
     document.getElementById("reportsActions").style.display = "none";
     document.getElementById("reportsSelector").style.display = "block";
