@@ -806,11 +806,19 @@ def api_add_server(s: ServerPayload):
     name = (s.name or "").strip()
     if not idrac_ip:
         return {"ok": False, "error": "Missing iDRAC IP"}
+    username = get_setting("idrac_username", "")
+    password = get_setting("idrac_password", "")
+    if not username or not password:
+        return {"ok": False, "error": "Configure iDRAC credentials in Settings first"}
+    result = _redfish_get(idrac_ip, REDFISH_SYSTEM_PATH, username, password)
+    if not result:
+        return {"ok": False, "error": "Cannot connect to iDRAC at " + idrac_ip}
+    model = result.get("Model", "")
     new_id = add_server(s.rack_id, idrac_ip, name)
     if new_id == -1:
         return {"ok": False, "error": "Maximum 20 servers per rack"}
-    logger.info("Server added: %s (%s) on rack %d", name or idrac_ip, idrac_ip, s.rack_id)
-    return {"ok": True, "id": new_id}
+    logger.info("Server added: %s (%s, %s) on rack %d", name or idrac_ip, idrac_ip, model, s.rack_id)
+    return {"ok": True, "id": new_id, "model": model}
 
 @app.post("/api/servers/delete")
 def api_delete_server(s: ServerDeletePayload):
@@ -2105,6 +2113,7 @@ def ui():
     const errEl = document.getElementById("editServerError");
     errEl.textContent = "";
     if (!ip) { errEl.textContent = "Enter iDRAC IP"; return; }
+    errEl.textContent = "Verifying iDRAC..."; errEl.style.color = "#94a3b8";
     try {
       const res = await fetch("/api/servers", {
         method:"POST", headers:{"Content-Type":"application/json"},
@@ -2112,10 +2121,11 @@ def ui():
       });
       const data = await res.json();
       if (data.ok) {
+        errEl.textContent = ""; errEl.style.color = "#f87171";
         document.getElementById("editServerIp").value = "";
         loadServersForEdit(editRackId);
-      } else errEl.textContent = data.error || "Add failed";
-    } catch(e) { errEl.textContent = "Add failed"; }
+      } else { errEl.textContent = data.error || "Add failed"; errEl.style.color = "#f87171"; }
+    } catch(e) { errEl.textContent = "Add failed"; errEl.style.color = "#f87171"; }
   }
 
   // ---------------- Remove Modal ----------------
