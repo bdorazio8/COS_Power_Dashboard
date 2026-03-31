@@ -1639,6 +1639,10 @@ def ui():
         <div style="opacity:0.7;font-size:13px;margin-bottom:12px">Go to Settings and configure the OME connection first.</div>
         <button onclick="closeReports()">OK</button>
       </div>
+      <div id="reportsError" style="display:none;padding:12px 0">
+        <div id="reportsErrorMsg" style="font-weight:700;color:#f87171;margin-bottom:12px"></div>
+        <button onclick="closeReports()">OK</button>
+      </div>
       <div id="reportsSelector" style="display:none">
         <div style="margin-bottom:8px"><span style="color:#cbd5e1;font-weight:600">Select Report:</span></div>
         <select id="reportSelect" style="width:100%;padding:10px;border-radius:10px;border:1px solid rgba(255,255,255,0.16);background:#0b1220;color:white;font-size:14px;margin-bottom:10px"></select>
@@ -2566,6 +2570,7 @@ def ui():
     const modal = document.getElementById("reportsModal");
     modal.style.display = "flex";
     document.getElementById("reportsNotConfigured").style.display = "none";
+    document.getElementById("reportsError").style.display = "none";
     document.getElementById("reportsSelector").style.display = "none";
     document.getElementById("reportsResults").style.display = "none";
     document.getElementById("reportsActions").style.display = "none";
@@ -2614,8 +2619,8 @@ def ui():
       const data = await res.json();
       document.getElementById("reportsLoading").style.display = "none";
       if (!data.ok) {
-        document.getElementById("reportsSelector").style.display = "block";
-        alert(data.error || "Report failed");
+        document.getElementById("reportsErrorMsg").textContent = data.error || "Report failed";
+        document.getElementById("reportsError").style.display = "block";
         return;
       }
       renderReportTable(data.columns, data.rows);
