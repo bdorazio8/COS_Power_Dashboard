@@ -3,12 +3,16 @@ import json
 import logging
 import sqlite3
 import subprocess
+import urllib3
 from logging.handlers import RotatingFileHandler
 from typing import Dict, Set, List, Optional
 
+import requests as req_lib
 from fastapi import FastAPI, WebSocket
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ----------------------------
 # Constants
@@ -30,6 +34,12 @@ OID_STECH_BREAKER_BASE = "1.3.6.1.4.1.13742.6.6.2.3.1.4.1"
 # Per-phase inlet sensors: .1.3.6.1.4.1.13742.6.5.2.4.1.4.1.1.{phase}.{sensor_type}
 # sensor_type: 1=rmsCurrent(÷1000), 5=activePower(direct W)
 OID_RARITAN_PHASE_BASE = "1.3.6.1.4.1.13742.6.5.2.4.1.4.1.1"
+
+# Redfish (iDRAC) endpoints
+REDFISH_POWER_PATH = "/redfish/v1/Chassis/System.Embedded.1/Power"
+REDFISH_THERMAL_PATH = "/redfish/v1/Chassis/System.Embedded.1/Thermal"
+REDFISH_SYSTEM_PATH = "/redfish/v1/Systems/System.Embedded.1"
+REDFISH_TIMEOUT = 5
 
 # ----------------------------
 # Logging
@@ -385,6 +395,23 @@ def detect_pdu_type(ip: str) -> Optional[str]:
     return None
 
 # ----------------------------
+# Redfish Helpers
+# ----------------------------
+
+def _redfish_get(ip: str, path: str, username: str, password: str) -> Optional[dict]:
+    """Blocking HTTP GET to a Redfish endpoint. Returns parsed JSON or None."""
+    try:
+        url = f"https://{ip}{path}"
+        resp = req_lib.get(url, auth=(username, password), verify=False, timeout=REDFISH_TIMEOUT)
+        if resp.status_code == 200:
+            return resp.json()
+        logger.warning("Redfish %s returned %d", url, resp.status_code)
+        return None
+    except Exception as e:
+        logger.warning("Redfish error for %s: %s", ip, e)
+        return None
+
+# ----------------------------
 # Poll Loop / Live State
 # ----------------------------
 
@@ -616,6 +643,38 @@ def api_set_title(p: TitlePayload):
     set_setting("dashboard_title", title)
     logger.info("Dashboard title changed to: %s", title)
     return {"ok": True, "title": title}
+
+@app.get("/api/settings/idrac")
+def api_get_idrac_creds():
+    username = get_setting("idrac_username", "")
+    has_password = bool(get_setting("idrac_password", ""))
+    return {"ok": True, "username": username, "has_password": has_password}
+
+@app.post("/api/settings/idrac")
+def api_set_idrac_creds(data: dict):
+    username = (data.get("username") or "").strip()
+    password = (data.get("password") or "").strip()
+    if not username or not password:
+        return {"ok": False, "error": "Username and password required"}
+    set_setting("idrac_username", username)
+    set_setting("idrac_password", password)
+    logger.info("iDRAC credentials updated (user: %s)", username)
+    return {"ok": True}
+
+@app.post("/api/settings/idrac/test")
+def api_test_idrac(data: dict):
+    ip = (data.get("ip") or "").strip()
+    username = (data.get("username") or "").strip()
+    password = (data.get("password") or "").strip()
+    if not password:
+        password = get_setting("idrac_password", "")
+    if not ip or not username or not password:
+        return {"ok": False, "error": "Need IP and credentials"}
+    result = _redfish_get(ip, REDFISH_SYSTEM_PATH, username, password)
+    if result:
+        model = result.get("Model", "Unknown")
+        return {"ok": True, "model": model}
+    return {"ok": False, "error": "Could not connect to iDRAC"}
 
 # ----------------------------
 # Systems API
@@ -1230,6 +1289,17 @@ def ui():
         <label style="cursor:pointer;white-space:nowrap"><input type="radio" name="viewportStyle" value="racks" id="vpRacks" checked /> Racks</label>
         <label style="cursor:pointer;white-space:nowrap"><input type="radio" name="viewportStyle" value="fill" id="vpFill" /> Fill</label>
       </div>
+      <div style="margin-top:16px;border-top:1px solid rgba(255,255,255,0.08);padding-top:12px">
+        <div style="margin-bottom:4px"><span style="color:#cbd5e1;font-weight:600">iDRAC Credentials:</span></div>
+        <div class="hint">Shared credentials for all iDRAC/Redfish endpoints</div>
+        <input id="idracUser" placeholder="iDRAC Username" />
+        <input id="idracPass" type="password" placeholder="iDRAC Password" />
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+          <input id="idracTestIp" placeholder="Test IP (any iDRAC)" style="margin-bottom:0;flex:1" />
+          <button onclick="testIdrac()" style="white-space:nowrap;padding:10px 14px;font-size:13px;background:rgba(37,99,235,0.3);color:#93c5fd;border:1px solid rgba(37,99,235,0.3);border-radius:10px;cursor:pointer;font-weight:700">Test</button>
+        </div>
+        <div id="idracTestResult" style="font-size:13px;font-weight:700;min-height:0"></div>
+      </div>
       <div class="row" style="margin-top:12px">
         <button class="primary" onclick="saveSettings()">Save</button>
         <button onclick="closeSettings()">Cancel</button>
@@ -1659,6 +1729,10 @@ def ui():
     viewportStyle = localStorage.getItem("viewportStyle") || "racks";
     computeRackSize(racksCache.length);
 
+    document.getElementById("idracPass").addEventListener("focus", function() {
+      if (this.dataset.unchanged === "true") { this.value = ""; this.dataset.unchanged = "false"; }
+    });
+
     const pduIpEl = document.getElementById("pduIp");
     pduIpEl.addEventListener("input", () => {
       const ip = pduIpEl.value.trim();
@@ -1948,8 +2022,19 @@ def ui():
     document.getElementById("settingsModal").style.display = "flex";
     const current = document.getElementById("dashTitle").innerText || "";
     document.getElementById("titleInput").value = current.trim();
-    // Load viewport style
     document.getElementById(viewportStyle === "fill" ? "vpFill" : "vpRacks").checked = true;
+    document.getElementById("idracTestResult").textContent = "";
+    document.getElementById("idracTestIp").value = "";
+    try {
+      const ir = await fetch("/api/settings/idrac");
+      const id = await ir.json();
+      if (id && id.ok) {
+        document.getElementById("idracUser").value = id.username || "";
+        const passEl = document.getElementById("idracPass");
+        passEl.value = id.has_password ? "********" : "";
+        passEl.dataset.unchanged = id.has_password ? "true" : "false";
+      }
+    } catch(e) {}
     setTimeout(() => document.getElementById("titleInput").focus(), 50);
   }
 
@@ -1965,7 +2050,6 @@ def ui():
   async function saveSettings() {
     const titleVal = (document.getElementById("titleInput").value || "").trim();
     const vpVal = document.querySelector('input[name="viewportStyle"]:checked').value;
-    // Save viewport style to browser localStorage (per-device)
     localStorage.setItem("viewportStyle", vpVal);
     viewportStyle = vpVal;
     computeRackSize(racksCache.length);
@@ -1976,8 +2060,46 @@ def ui():
       });
       const titleData = await titleRes.json();
       if (titleData && titleData.ok && titleData.title) applyTitle(titleData.title);
-      closeSettings();
     } catch(e) {}
+    // Save iDRAC credentials if changed
+    const idracUser = document.getElementById("idracUser").value.trim();
+    const idracPassEl = document.getElementById("idracPass");
+    const idracPass = idracPassEl.value.trim();
+    if (idracUser && idracPass && idracPassEl.dataset.unchanged !== "true") {
+      try {
+        await fetch("/api/settings/idrac", {
+          method:"POST", headers:{"Content-Type":"application/json"},
+          body: JSON.stringify({username: idracUser, password: idracPass})
+        });
+      } catch(e) {}
+    }
+    closeSettings();
+  }
+
+  async function testIdrac() {
+    const ip = document.getElementById("idracTestIp").value.trim();
+    const user = document.getElementById("idracUser").value.trim();
+    const passEl = document.getElementById("idracPass");
+    const pass = passEl.dataset.unchanged === "true" ? "" : passEl.value.trim();
+    const result = document.getElementById("idracTestResult");
+    if (!ip || !user || (!pass && passEl.dataset.unchanged !== "true")) {
+      result.textContent = "Enter IP, username, and password";
+      result.style.color = "#f87171";
+      return;
+    }
+    result.textContent = "Testing..."; result.style.color = "#94a3b8";
+    try {
+      const body = {ip, username: user};
+      if (pass) body.password = pass;
+      else body.password = ""; // server will use stored password
+      const res = await fetch("/api/settings/idrac/test", {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify(body)
+      });
+      const data = await res.json();
+      if (data.ok) { result.textContent = "Connected — " + (data.model || "OK"); result.style.color = "#22c55e"; }
+      else { result.textContent = data.error || "Connection failed"; result.style.color = "#f87171"; }
+    } catch(e) { result.textContent = "Test failed"; result.style.color = "#f87171"; }
   }
 
 </script>
