@@ -901,7 +901,7 @@ def api_run_report(data: dict):
         if configured_ips and server_id in configured_ips:
             rows.append(values)
     if not configured_ips:
-        return {"ok": False, "error": "No servers configured in dashboard. Add servers to racks first."}
+        return {"ok": False, "error": "No servers configured in dashboard.", "detail": "Add servers to racks first."}
     return {"ok": True, "columns": columns, "rows": rows}
 
 # ----------------------------
@@ -1640,7 +1640,8 @@ def ui():
         <button onclick="closeReports()">OK</button>
       </div>
       <div id="reportsError" style="display:none;padding:12px 0">
-        <div id="reportsErrorMsg" style="font-weight:700;color:#f87171;margin-bottom:12px"></div>
+        <div id="reportsErrorMsg" style="font-weight:700;color:#f87171;margin-bottom:8px"></div>
+        <div id="reportsErrorDetail" style="opacity:0.7;font-size:13px;margin-bottom:12px"></div>
         <button onclick="closeReports()">OK</button>
       </div>
       <div id="reportsSelector" style="display:none">
@@ -2620,6 +2621,7 @@ def ui():
       document.getElementById("reportsLoading").style.display = "none";
       if (!data.ok) {
         document.getElementById("reportsErrorMsg").textContent = data.error || "Report failed";
+        document.getElementById("reportsErrorDetail").textContent = data.detail || "";
         document.getElementById("reportsError").style.display = "block";
         return;
       }
