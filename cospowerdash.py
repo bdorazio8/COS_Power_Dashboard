@@ -873,6 +873,12 @@ def api_run_report(data: dict):
     token = _ome_session()
     if not token:
         return {"ok": False, "error": "OME not configured or auth failed"}
+    # Get all configured server iDRAC IPs for filtering
+    all_servers = get_all_servers()
+    configured_ips = set()
+    for rack_servers in all_servers.values():
+        for srv in rack_servers:
+            configured_ips.add(srv["idrac_ip"].strip())
     # Run the report
     _ome_post(token, "/ReportService/Actions/ReportService.RunReport", {"ReportDefId": int(report_id)})
     # Fetch results
@@ -884,9 +890,18 @@ def api_run_report(data: dict):
     columns = []
     if report_def:
         columns = [c["Name"] for c in report_def.get("ColumnNames", [])]
+    # Filter rows to only servers configured in our dashboard
+    # Server IP/Name is typically the first column in OME reports
     rows = []
     for row in results.get("value", []):
-        rows.append(row.get("Values", []))
+        values = row.get("Values", [])
+        if not values:
+            continue
+        server_id = values[0].strip() if values[0] else ""
+        if configured_ips and server_id in configured_ips:
+            rows.append(values)
+    if not configured_ips:
+        return {"ok": False, "error": "No servers configured in dashboard. Add servers to racks first."}
     return {"ok": True, "columns": columns, "rows": rows}
 
 # ----------------------------
