@@ -572,14 +572,14 @@ async def poll_loop():
 
                     phases = []
                     if pdu_type == "servertech":
-                        for br_idx, phase_label in [(1, "A"), (2, "B"), (3, "C")]:
+                        for br_idx in (1, 2, 3):
                             raw_a = snmp_get(pdu_ip, f"{OID_STECH_BREAKER_BASE}.{br_idx}.1.1")
                             raw_w = snmp_get(pdu_ip, f"{OID_STECH_BREAKER_BASE}.{br_idx}.1.5")
                             amps_raw = _parse_int(raw_a) if raw_a else None
                             watts_raw = _parse_int(raw_w) if raw_w else None
                             amps = round(amps_raw / 1000, 2) if amps_raw is not None else 0.0
                             watts = watts_raw if watts_raw is not None else 0
-                            phases.append({"label": "Phase " + phase_label, "current_a": amps, "power_w": watts, "reachable": True})
+                            phases.append({"label": f"BR{br_idx}", "current_a": amps, "power_w": watts, "reachable": True})
 
                     elif pdu_type == "raritan":
                         for phase_idx, phase_label in [(1, "A"), (2, "B"), (3, "C")]:
