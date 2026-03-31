@@ -25,10 +25,10 @@ DEFAULT_DASH_TITLE = "Power Dashboard"
 # PDU model detection (both Server Tech and Raritan share enterprise 13742)
 OID_PDU_MODEL = "1.3.6.1.4.1.13742.6.3.2.1.1.3.1"
 
-# Server Tech PRO4X — single-phase, 3 breakers
-# Breaker sensors: .1.3.6.1.4.1.13742.6.6.2.3.1.4.1.1.{sensor_type}.{breaker}
+# Server Tech PRO4X — single-phase
+# Inlet aggregate sensors: .1.3.6.1.4.1.13742.6.5.2.3.1.4.1.1.{sensor_type}
 # sensor_type: 1=rmsCurrent(÷1000), 5=activePower(direct W)
-OID_STECH_BREAKER_BASE = "1.3.6.1.4.1.13742.6.6.2.3.1.4.1.1"
+OID_STECH_INLET_BASE = "1.3.6.1.4.1.13742.6.5.2.3.1.4.1.1"
 
 # Raritan PX3 — 3-phase
 # Per-phase inlet sensors: .1.3.6.1.4.1.13742.6.5.2.4.1.4.1.1.{phase}.{sensor_type}
@@ -572,14 +572,13 @@ async def poll_loop():
 
                     phases = []
                     if pdu_type == "servertech":
-                        for br_idx in (1, 2, 3):
-                            raw_a = snmp_get(pdu_ip, f"{OID_STECH_BREAKER_BASE}.1.{br_idx}")
-                            raw_w = snmp_get(pdu_ip, f"{OID_STECH_BREAKER_BASE}.5.{br_idx}")
-                            amps_raw = _parse_int(raw_a) if raw_a else None
-                            watts_raw = _parse_int(raw_w) if raw_w else None
-                            amps = round(amps_raw / 1000, 2) if amps_raw is not None else 0.0
-                            watts = watts_raw if watts_raw is not None else 0
-                            phases.append({"label": f"BR{br_idx}", "current_a": amps, "power_w": watts, "reachable": True})
+                        raw_a = snmp_get(pdu_ip, f"{OID_STECH_INLET_BASE}.1")
+                        raw_w = snmp_get(pdu_ip, f"{OID_STECH_INLET_BASE}.5")
+                        amps_raw = _parse_int(raw_a) if raw_a else None
+                        watts_raw = _parse_int(raw_w) if raw_w else None
+                        amps = round(amps_raw / 1000, 2) if amps_raw is not None else 0.0
+                        watts = watts_raw if watts_raw is not None else 0
+                        phases.append({"label": "Total", "current_a": amps, "power_w": watts, "reachable": True})
 
                     elif pdu_type == "raritan":
                         for phase_idx, phase_label in [(1, "A"), (2, "B"), (3, "C")]:
