@@ -749,6 +749,147 @@ def api_test_idrac(data: dict):
     return {"ok": False, "error": "Could not connect to iDRAC"}
 
 # ----------------------------
+# OME Settings & Reports API
+# ----------------------------
+
+def _ome_session() -> Optional[str]:
+    """Authenticate to OME and return X-Auth-Token, or None on failure."""
+    host = get_setting("ome_host", "")
+    username = get_setting("ome_username", "")
+    password = get_setting("ome_password", "")
+    if not host or not username or not password:
+        return None
+    try:
+        resp = req_lib.post(
+            f"https://{host}/api/SessionService/Sessions",
+            json={"UserName": username, "Password": password},
+            verify=False, timeout=REDFISH_TIMEOUT,
+        )
+        if resp.status_code == 200 or resp.status_code == 201:
+            return resp.headers.get("X-Auth-Token")
+        return None
+    except Exception as e:
+        logger.warning("OME auth failed: %s", e)
+        return None
+
+def _ome_get(token: str, path: str) -> Optional[dict]:
+    """GET request to OME API with auth token."""
+    host = get_setting("ome_host", "")
+    try:
+        resp = req_lib.get(
+            f"https://{host}/api{path}",
+            headers={"X-Auth-Token": token},
+            verify=False, timeout=10,
+        )
+        if resp.status_code == 200:
+            return resp.json()
+        return None
+    except Exception as e:
+        logger.warning("OME GET %s failed: %s", path, e)
+        return None
+
+def _ome_post(token: str, path: str, body: dict):
+    """POST request to OME API with auth token."""
+    host = get_setting("ome_host", "")
+    try:
+        resp = req_lib.post(
+            f"https://{host}/api{path}",
+            headers={"X-Auth-Token": token, "Content-Type": "application/json"},
+            json=body, verify=False, timeout=10,
+        )
+        if resp.status_code == 200:
+            try:
+                return resp.json()
+            except Exception:
+                return resp.text.strip()
+        return None
+    except Exception as e:
+        logger.warning("OME POST %s failed: %s", path, e)
+        return None
+
+@app.get("/api/settings/ome")
+def api_get_ome_creds():
+    host = get_setting("ome_host", "")
+    username = get_setting("ome_username", "")
+    has_password = bool(get_setting("ome_password", ""))
+    return {"ok": True, "host": host, "username": username, "has_password": has_password}
+
+@app.post("/api/settings/ome")
+def api_set_ome_creds(data: dict):
+    host = (data.get("host") or "").strip()
+    username = (data.get("username") or "").strip()
+    password = (data.get("password") or "").strip()
+    if not host or not username or not password:
+        return {"ok": False, "error": "Host, username, and password required"}
+    set_setting("ome_host", host)
+    set_setting("ome_username", username)
+    set_setting("ome_password", password)
+    logger.info("OME credentials updated (host: %s, user: %s)", host, username)
+    return {"ok": True}
+
+@app.post("/api/settings/ome/test")
+def api_test_ome(data: dict):
+    host = (data.get("host") or "").strip() or get_setting("ome_host", "")
+    username = (data.get("username") or "").strip() or get_setting("ome_username", "")
+    password = (data.get("password") or "").strip()
+    if not password:
+        password = get_setting("ome_password", "")
+    if not host or not username or not password:
+        return {"ok": False, "error": "Need host, username, and password"}
+    try:
+        resp = req_lib.post(
+            f"https://{host}/api/SessionService/Sessions",
+            json={"UserName": username, "Password": password},
+            verify=False, timeout=REDFISH_TIMEOUT,
+        )
+        if resp.status_code in (200, 201):
+            return {"ok": True}
+        return {"ok": False, "error": f"Auth failed (HTTP {resp.status_code})"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+@app.get("/api/reports/available")
+def api_reports_available():
+    token = _ome_session()
+    if not token:
+        return {"ok": False, "error": "OME not configured or auth failed"}
+    data = _ome_get(token, "/ReportService/ReportDefs")
+    if not data:
+        return {"ok": False, "error": "Failed to fetch report definitions"}
+    reports = []
+    for r in data.get("value", []):
+        cat = r.get("Category", "")
+        name = r.get("Name", "")
+        if "Power" in cat or "power" in name.lower() or "energy" in name.lower() or "greenhouse" in name.lower() or "gpu" in name.lower() or "cpu" in name.lower() or "thermal" in name.lower():
+            cols = [c["Name"] for c in r.get("ColumnNames", [])]
+            reports.append({"id": r["Id"], "name": name, "category": cat, "columns": cols})
+    return {"ok": True, "reports": reports}
+
+@app.post("/api/reports/run")
+def api_run_report(data: dict):
+    report_id = data.get("report_id")
+    if not report_id:
+        return {"ok": False, "error": "Missing report_id"}
+    token = _ome_session()
+    if not token:
+        return {"ok": False, "error": "OME not configured or auth failed"}
+    # Run the report
+    _ome_post(token, "/ReportService/Actions/ReportService.RunReport", {"ReportDefId": int(report_id)})
+    # Fetch results
+    results = _ome_get(token, f"/ReportService/ReportDefs({report_id})/ReportResults/ResultRows")
+    if not results:
+        return {"ok": False, "error": "Failed to fetch report results"}
+    # Get column names
+    report_def = _ome_get(token, f"/ReportService/ReportDefs({report_id})")
+    columns = []
+    if report_def:
+        columns = [c["Name"] for c in report_def.get("ColumnNames", [])]
+    rows = []
+    for row in results.get("value", []):
+        rows.append(row.get("Values", []))
+    return {"ok": True, "columns": columns, "rows": rows}
+
+# ----------------------------
 # Systems API
 # ----------------------------
 
@@ -1278,6 +1419,27 @@ def ui():
     margin-bottom: 10px;
     line-height: 1.35;
   }
+
+  #reportsTable th {
+    background: #1e293b;
+    color: #94a3b8;
+    font-weight: 700;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    padding: 8px 6px;
+    text-align: left;
+    border-bottom: 1px solid rgba(255,255,255,0.1);
+    white-space: nowrap;
+  }
+  #reportsTable td {
+    padding: 6px;
+    border-bottom: 1px solid rgba(255,255,255,0.04);
+    white-space: nowrap;
+  }
+  #reportsTable tr:hover td {
+    background: rgba(255,255,255,0.03);
+  }
 </style>
 </head>
 <body>
@@ -1294,6 +1456,14 @@ def ui():
         <svg viewBox="0 0 24 24" aria-hidden="true">
           <rect x="3" y="3" width="18" height="18" rx="4" ry="4" fill="none" stroke="rgba(226,232,240,0.92)" stroke-width="1.8"/>
           <line x1="7.5" y1="12" x2="16.5" y2="12" stroke="rgba(226,232,240,0.92)" stroke-width="2" stroke-linecap="round"/>
+        </svg>
+      </div>
+      <div class="icon-btn" onclick="openReports()" title="Reports">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M6 2a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6H6z" fill="none" stroke="rgba(226,232,240,0.92)" stroke-width="1.8"/>
+          <polyline points="14 2 14 8 20 8" fill="none" stroke="rgba(226,232,240,0.92)" stroke-width="1.8"/>
+          <line x1="8" y1="13" x2="16" y2="13" stroke="rgba(226,232,240,0.92)" stroke-width="1.5" stroke-linecap="round"/>
+          <line x1="8" y1="17" x2="13" y2="17" stroke="rgba(226,232,240,0.92)" stroke-width="1.5" stroke-linecap="round"/>
         </svg>
       </div>
       <div class="gear" onclick="openSettings()" title="Settings">
@@ -1426,9 +1596,53 @@ def ui():
         </div>
         <div id="idracTestResult" style="font-size:13px;font-weight:700;min-height:0"></div>
       </div>
+      <div style="margin-top:16px;border-top:1px solid rgba(255,255,255,0.08);padding-top:12px">
+        <div style="margin-bottom:4px"><span style="color:#cbd5e1;font-weight:600">OME Connection:</span></div>
+        <input id="omeHost" placeholder="OME Host (IP or hostname)" style="margin-bottom:8px" />
+        <div style="display:flex;gap:8px;margin-bottom:8px">
+          <input id="omeUser" placeholder="Username" style="flex:1;margin-bottom:0" />
+          <input id="omePass" type="password" placeholder="Password" style="flex:1;margin-bottom:0" />
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+          <button onclick="testOme()" style="white-space:nowrap;padding:10px 14px;font-size:13px;background:rgba(37,99,235,0.3);color:#93c5fd;border:1px solid rgba(37,99,235,0.3);border-radius:10px;cursor:pointer;font-weight:700">Test Connection</button>
+          <span id="omeTestResult" style="font-size:13px;font-weight:700"></span>
+        </div>
+      </div>
       <div class="row" style="margin-top:12px">
         <button class="primary" onclick="saveSettings()">Save</button>
         <button onclick="closeSettings()">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Reports Modal -->
+  <div class="modal" id="reportsModal">
+    <div class="modal-content" style="width:min(700px, 95vw);max-height:85vh;display:flex;flex-direction:column">
+      <h3>Reports</h3>
+      <div id="reportsNotConfigured" style="display:none;padding:12px 0">
+        <div style="font-weight:700;color:#f87171;margin-bottom:8px">OME connection not configured.</div>
+        <div style="opacity:0.7;font-size:13px">Go to Settings and configure the OME connection first.</div>
+      </div>
+      <div id="reportsSelector" style="display:none">
+        <div style="margin-bottom:8px"><span style="color:#cbd5e1;font-weight:600">Select Report:</span></div>
+        <select id="reportSelect" style="width:100%;padding:10px;border-radius:10px;border:1px solid rgba(255,255,255,0.16);background:#0b1220;color:white;font-size:14px;margin-bottom:10px"></select>
+        <div class="row">
+          <button class="primary" onclick="runReport()">Generate</button>
+          <button onclick="closeReports()">Cancel</button>
+        </div>
+      </div>
+      <div id="reportsLoading" style="display:none;padding:20px 0;text-align:center;opacity:0.6;font-weight:700">Loading...</div>
+      <div id="reportsResults" style="display:none;flex:1;min-height:0;overflow:auto;margin-top:10px">
+        <table id="reportsTable" style="width:100%;border-collapse:collapse;font-size:12px">
+          <thead id="reportsHead" style="position:sticky;top:0"></thead>
+          <tbody id="reportsBody"></tbody>
+        </table>
+      </div>
+      <div id="reportsActions" style="display:none;margin-top:10px">
+        <div class="row">
+          <button onclick="backToReportSelect()">Back</button>
+          <button onclick="closeReports()">Close</button>
+        </div>
       </div>
     </div>
   </div>
@@ -1858,6 +2072,9 @@ def ui():
     document.getElementById("idracPass").addEventListener("focus", function() {
       if (this.dataset.unchanged === "true") { this.value = ""; this.dataset.unchanged = "false"; }
     });
+    document.getElementById("omePass").addEventListener("focus", function() {
+      if (this.dataset.unchanged === "true") { this.value = ""; this.dataset.unchanged = "false"; }
+    });
 
     const pduIpEl = document.getElementById("pduIp");
     pduIpEl.addEventListener("input", () => {
@@ -2217,6 +2434,18 @@ def ui():
         passEl.dataset.unchanged = id.has_password ? "true" : "false";
       }
     } catch(e) {}
+    document.getElementById("omeTestResult").textContent = "";
+    try {
+      const or = await fetch("/api/settings/ome");
+      const od = await or.json();
+      if (od && od.ok) {
+        document.getElementById("omeHost").value = od.host || "";
+        document.getElementById("omeUser").value = od.username || "";
+        const omePassEl = document.getElementById("omePass");
+        omePassEl.value = od.has_password ? "********" : "";
+        omePassEl.dataset.unchanged = od.has_password ? "true" : "false";
+      }
+    } catch(e) {}
     setTimeout(() => document.getElementById("titleInput").focus(), 50);
   }
 
@@ -2255,6 +2484,19 @@ def ui():
         });
       } catch(e) {}
     }
+    // Save OME credentials if changed
+    const omeHost = document.getElementById("omeHost").value.trim();
+    const omeUser = document.getElementById("omeUser").value.trim();
+    const omePassEl = document.getElementById("omePass");
+    const omePass = omePassEl.value.trim();
+    if (omeHost && omeUser && omePass && omePassEl.dataset.unchanged !== "true") {
+      try {
+        await fetch("/api/settings/ome", {
+          method:"POST", headers:{"Content-Type":"application/json"},
+          body: JSON.stringify({host: omeHost, username: omeUser, password: omePass})
+        });
+      } catch(e) {}
+    }
     closeSettings();
   }
 
@@ -2282,6 +2524,120 @@ def ui():
       if (data.ok) { result.textContent = "Connected — " + (data.model || "OK"); result.style.color = "#22c55e"; }
       else { result.textContent = data.error || "Connection failed"; result.style.color = "#f87171"; }
     } catch(e) { result.textContent = "Test failed"; result.style.color = "#f87171"; }
+  }
+
+  async function testOme() {
+    const host = document.getElementById("omeHost").value.trim();
+    const user = document.getElementById("omeUser").value.trim();
+    const passEl = document.getElementById("omePass");
+    const pass = passEl.dataset.unchanged === "true" ? "" : passEl.value.trim();
+    const result = document.getElementById("omeTestResult");
+    if (!host || !user || (!pass && passEl.dataset.unchanged !== "true")) {
+      result.textContent = "Enter host, username, and password"; result.style.color = "#f87171"; return;
+    }
+    result.textContent = "Testing..."; result.style.color = "#94a3b8";
+    try {
+      const body = {host, username: user, password: pass || ""};
+      const res = await fetch("/api/settings/ome/test", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+      const data = await res.json();
+      if (data.ok) { result.textContent = "Connected"; result.style.color = "#22c55e"; }
+      else { result.textContent = data.error || "Failed"; result.style.color = "#f87171"; }
+    } catch(e) { result.textContent = "Test failed"; result.style.color = "#f87171"; }
+  }
+
+  // ---------------- Reports ----------------
+  async function openReports() {
+    const modal = document.getElementById("reportsModal");
+    modal.style.display = "flex";
+    document.getElementById("reportsNotConfigured").style.display = "none";
+    document.getElementById("reportsSelector").style.display = "none";
+    document.getElementById("reportsResults").style.display = "none";
+    document.getElementById("reportsActions").style.display = "none";
+    document.getElementById("reportsLoading").style.display = "block";
+
+    try {
+      const res = await fetch("/api/reports/available");
+      const data = await res.json();
+      document.getElementById("reportsLoading").style.display = "none";
+      if (!data.ok) {
+        document.getElementById("reportsNotConfigured").style.display = "block";
+        return;
+      }
+      const select = document.getElementById("reportSelect");
+      select.innerHTML = "";
+      (data.reports || []).forEach(r => {
+        const opt = document.createElement("option");
+        opt.value = r.id;
+        opt.textContent = r.name;
+        select.appendChild(opt);
+      });
+      document.getElementById("reportsSelector").style.display = "block";
+    } catch(e) {
+      document.getElementById("reportsLoading").style.display = "none";
+      document.getElementById("reportsNotConfigured").style.display = "block";
+    }
+  }
+
+  function closeReports() {
+    document.getElementById("reportsModal").style.display = "none";
+  }
+
+  async function runReport() {
+    const reportId = document.getElementById("reportSelect").value;
+    if (!reportId) return;
+    document.getElementById("reportsSelector").style.display = "none";
+    document.getElementById("reportsLoading").style.display = "block";
+    document.getElementById("reportsResults").style.display = "none";
+    document.getElementById("reportsActions").style.display = "none";
+
+    try {
+      const res = await fetch("/api/reports/run", {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({report_id: parseInt(reportId)})
+      });
+      const data = await res.json();
+      document.getElementById("reportsLoading").style.display = "none";
+      if (!data.ok) {
+        document.getElementById("reportsSelector").style.display = "block";
+        alert(data.error || "Report failed");
+        return;
+      }
+      renderReportTable(data.columns, data.rows);
+    } catch(e) {
+      document.getElementById("reportsLoading").style.display = "none";
+      document.getElementById("reportsSelector").style.display = "block";
+    }
+  }
+
+  function renderReportTable(columns, rows) {
+    const head = document.getElementById("reportsHead");
+    const body = document.getElementById("reportsBody");
+    head.innerHTML = "";
+    body.innerHTML = "";
+    const tr = document.createElement("tr");
+    columns.forEach(col => {
+      const th = document.createElement("th");
+      th.textContent = col;
+      tr.appendChild(th);
+    });
+    head.appendChild(tr);
+    rows.forEach(row => {
+      const tr = document.createElement("tr");
+      row.forEach(val => {
+        const td = document.createElement("td");
+        td.textContent = (val || "").trim() || "--";
+        tr.appendChild(td);
+      });
+      body.appendChild(tr);
+    });
+    document.getElementById("reportsResults").style.display = "block";
+    document.getElementById("reportsActions").style.display = "block";
+  }
+
+  function backToReportSelect() {
+    document.getElementById("reportsResults").style.display = "none";
+    document.getElementById("reportsActions").style.display = "none";
+    document.getElementById("reportsSelector").style.display = "block";
   }
 
 </script>
