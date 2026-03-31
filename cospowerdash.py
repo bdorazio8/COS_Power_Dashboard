@@ -1291,9 +1291,10 @@ def ui():
       </div>
       <div style="margin-top:16px;border-top:1px solid rgba(255,255,255,0.08);padding-top:12px">
         <div style="margin-bottom:4px"><span style="color:#cbd5e1;font-weight:600">iDRAC Credentials:</span></div>
-        <div class="hint">Shared credentials for all iDRAC/Redfish endpoints</div>
-        <input id="idracUser" placeholder="iDRAC Username" />
-        <input id="idracPass" type="password" placeholder="iDRAC Password" />
+        <div style="display:flex;gap:8px;margin-bottom:8px">
+          <input id="idracUser" placeholder="Username" style="flex:1;margin-bottom:0" />
+          <input id="idracPass" type="password" placeholder="Password" style="flex:1;margin-bottom:0" />
+        </div>
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
           <input id="idracTestIp" placeholder="Test IP (any iDRAC)" style="margin-bottom:0;flex:1" />
           <button onclick="testIdrac()" style="white-space:nowrap;padding:10px 14px;font-size:13px;background:rgba(37,99,235,0.3);color:#93c5fd;border:1px solid rgba(37,99,235,0.3);border-radius:10px;cursor:pointer;font-weight:700">Test</button>
