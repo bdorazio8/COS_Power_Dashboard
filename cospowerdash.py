@@ -18,7 +18,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # Constants
 # ----------------------------
 
-DB = "upsdash.db"
+DB = "powerdash.db"
 SNMP_COMMUNITY = "public"
 DEFAULT_DASH_TITLE = "Power Dashboard"
 
