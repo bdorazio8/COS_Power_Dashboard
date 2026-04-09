@@ -1756,8 +1756,8 @@ def ui():
       </div>
       <div style="margin-top:12px;display:flex;align-items:center;gap:12px">
         <span style="color:#cbd5e1;font-weight:600;white-space:nowrap">PDU Load Style:</span>
-        <label style="cursor:pointer;white-space:nowrap"><input type="radio" name="pduLoadStyle" value="grouped" id="loadGrouped" checked /> Grouped Below</label>
-        <label style="cursor:pointer;white-space:nowrap"><input type="radio" name="pduLoadStyle" value="inline" id="loadInline" /> Inline In Phase</label>
+        <label style="cursor:pointer;white-space:nowrap"><input type="radio" name="pduLoadStyle" value="grouped" id="loadGrouped" checked /> Grouped</label>
+        <label style="cursor:pointer;white-space:nowrap"><input type="radio" name="pduLoadStyle" value="inline" id="loadInline" /> Individual</label>
       </div>
       <div style="margin-top:16px;border-top:1px solid rgba(255,255,255,0.08);padding-top:12px">
         <div style="margin-bottom:4px"><span style="color:#cbd5e1;font-weight:600">iDRAC Credentials:</span></div>
