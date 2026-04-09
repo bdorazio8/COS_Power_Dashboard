@@ -1333,72 +1333,56 @@ def ui():
     overflow: hidden;
   }
   .pdu-load-section {
-    flex: 0.7 1 0;
+    flex: 0.75 1 0;
     min-height: 0;
     margin-top: 4px;
-    padding-top: 4px;
+    padding: 5px 7px;
     border-top: 2px solid rgba(167,139,250,0.55);
+    background: rgba(15,23,42,0.35);
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: 4px;
     overflow: hidden;
   }
-  .pdu-load-section.split { gap: 1px; }
+  .pdu-load-section.split { gap: 3px; }
   .pdu-load-row {
     flex: 1 1 0;
     min-height: 0;
     display: flex;
-    align-items: stretch;
-    gap: 4px;
+    align-items: center;
+    gap: 6px;
     overflow: hidden;
   }
   .pdu-load-row-label {
     flex: 0 0 auto;
-    align-self: center;
     font-weight: 900;
-    font-size: clamp(8px, 2.6cqi, 22px);
-    color: rgba(148,163,184,0.9);
-    width: 1.2em;
-    text-align: center;
+    font-size: clamp(9px, 3cqi, 28px);
+    color: rgba(226,232,240,0.92);
+    white-space: nowrap;
+    letter-spacing: 0.3px;
+    text-align: right;
+    min-width: 2.6em;
   }
-  .pdu-load-bar {
-    position: relative;
+  .pdu-load-section.split .pdu-load-row-label { font-size: clamp(8px, 2.4cqi, 20px); min-width: 3.2em; }
+  .pdu-load-track {
     flex: 1 1 0;
     min-width: 0;
-    background: rgba(15,23,42,0.7);
-    border: 1px solid rgba(255,255,255,0.1);
-    border-radius: 3px;
-    overflow: hidden;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-  .pdu-load-bar-single {
-    flex: 1 1 0;
     height: 100%;
+    display: flex;
+    gap: 0;
   }
-  .pdu-load-bar-fill {
-    position: absolute;
-    left: 0; top: 0; bottom: 0;
-    width: 0%;
-    transition: width 0.3s ease;
-    z-index: 0;
+  .pdu-load-seg {
+    flex: 1 1 0;
+    min-width: 0;
+    border-right: 2px solid #0b1220;
+    background: rgba(255,255,255,0.08);
+    transition: background 300ms;
   }
-  .pdu-load-bar-fill.green { background: rgba(34,197,94,0.55); }
-  .pdu-load-bar-fill.amber { background: rgba(245,158,11,0.6); }
-  .pdu-load-bar-fill.red   { background: rgba(239,68,68,0.6); }
-  .pdu-load-bar-text {
-    position: relative;
-    z-index: 1;
-    font-weight: 900;
-    color: white;
-    text-shadow: 0 1px 2px rgba(0,0,0,0.7);
-    white-space: nowrap;
-    font-size: clamp(9px, 3.2cqi, 28px);
-    padding: 0 6px;
-  }
-  .pdu-load-section.split .pdu-load-bar-text { font-size: clamp(7px, 2.4cqi, 18px); }
-  .pdu-load-bar-text.offline { color: rgba(255,255,255,0.3); }
+  .pdu-load-seg:last-child { border-right: none; }
+  .pdu-load-seg.on-green { background: #22c55e; box-shadow: 0 0 4px rgba(34,197,94,0.45); }
+  .pdu-load-seg.on-amber { background: #f59e0b; box-shadow: 0 0 4px rgba(245,158,11,0.45); }
+  .pdu-load-seg.on-red   { background: #ef4444; box-shadow: 0 0 4px rgba(239,68,68,0.45); }
+  .pdu-load-row-label.offline { color: rgba(255,255,255,0.3); }
   .crt-label {
     font-weight: 900;
     font-size: 10px;
@@ -2076,79 +2060,56 @@ def ui():
     return "green";
   }
 
+  const PDU_LOAD_SEGMENTS = 20;
+
+  function buildSegmentedTrack(pct, available) {
+    const track = document.createElement("div");
+    track.className = "pdu-load-track";
+    const lit = available ? Math.round((Math.min(100, Math.max(0, pct)) / 100) * PDU_LOAD_SEGMENTS) : 0;
+    const colorCls = available ? "on-" + loadColorClass(pct) : "";
+    for (let s = 0; s < PDU_LOAD_SEGMENTS; s++) {
+      const seg = document.createElement("div");
+      seg.className = "pdu-load-seg" + (s < lit ? " " + colorCls : "");
+      track.appendChild(seg);
+    }
+    return track;
+  }
+
+  function buildLoadRow(labelText, pct, available) {
+    const row = document.createElement("div");
+    row.className = "pdu-load-row";
+    const label = document.createElement("div");
+    label.className = "pdu-load-row-label" + (available ? "" : " offline");
+    label.textContent = available ? (labelText + " " + pct.toFixed(0) + "%") : (labelText + " --");
+    row.appendChild(label);
+    row.appendChild(buildSegmentedTrack(pct, available));
+    return row;
+  }
+
   function buildLoadSection(pdu) {
     const section = document.createElement("div");
     section.className = "pdu-load-section";
 
     const ratedA = (pdu.rated_a && pdu.rated_a > 0) ? pdu.rated_a : 30;
-    const reachable = pdu.reachable !== false && pdu.total_a !== null && pdu.total_a !== undefined;
     const phases = pdu.phases || [];
 
     if (pduLoadStyle === "split") {
-      // Style 2 — three thin per-phase load bars stacked
+      // Style 2 — three per-phase segmented bars stacked
       section.classList.add("split");
       phases.forEach(phase => {
-        const row = document.createElement("div");
-        row.className = "pdu-load-row";
-
-        const label = document.createElement("div");
-        label.className = "pdu-load-row-label";
-        label.textContent = (phase.label || "").replace("Phase ", "");
-        row.appendChild(label);
-
-        const bar = document.createElement("div");
-        bar.className = "pdu-load-bar";
-        const fill = document.createElement("div");
-        fill.className = "pdu-load-bar-fill";
-        const text = document.createElement("div");
-        text.className = "pdu-load-bar-text";
-
-        if (phase.reachable && ratedA > 0) {
-          const pct = Math.min(100, (phase.current_a / ratedA) * 100);
-          fill.style.width = pct.toFixed(1) + "%";
-          fill.classList.add(loadColorClass(pct));
-          text.textContent = pct.toFixed(0) + "%  " + phase.current_a.toFixed(2) + " / " + ratedA.toFixed(0) + " A";
-        } else {
-          fill.style.width = "0%";
-          text.textContent = "--";
-          text.classList.add("offline");
-        }
-        bar.appendChild(fill);
-        bar.appendChild(text);
-        row.appendChild(bar);
-        section.appendChild(row);
+        const letter = (phase.label || "").replace("Phase ", "");
+        const available = phase.reachable && ratedA > 0;
+        const pct = available ? Math.min(100, (phase.current_a / ratedA) * 100) : 0;
+        section.appendChild(buildLoadRow(letter, pct, available));
       });
     } else {
-      // Style 1 (default) — single full-width load bar showing max-phase load
+      // Style 1 (default) — single segmented bar showing max-phase load
       section.classList.add("single");
-
-      const bar = document.createElement("div");
-      bar.className = "pdu-load-bar pdu-load-bar-single";
-      const fill = document.createElement("div");
-      fill.className = "pdu-load-bar-fill";
-      const text = document.createElement("div");
-      text.className = "pdu-load-bar-text";
-
-      if (reachable && ratedA > 0) {
-        const reachablePhases = phases.filter(p => p.reachable);
-        const maxA = reachablePhases.length
-          ? Math.max(...reachablePhases.map(p => p.current_a || 0))
-          : 0;
-        const pct = Math.min(100, (maxA / ratedA) * 100);
-        fill.style.width = pct.toFixed(1) + "%";
-        fill.classList.add(loadColorClass(pct));
-        const wattsTxt = (pdu.total_w !== null && pdu.total_w !== undefined)
-          ? "  ·  " + Number(pdu.total_w).toFixed(0) + " W"
-          : "";
-        text.textContent = pct.toFixed(0) + "%   " + pdu.total_a.toFixed(2) + " / " + ratedA.toFixed(0) + " A" + wattsTxt;
-      } else {
-        fill.style.width = "0%";
-        text.textContent = "LOAD --";
-        text.classList.add("offline");
-      }
-      bar.appendChild(fill);
-      bar.appendChild(text);
-      section.appendChild(bar);
+      const reachablePhases = phases.filter(p => p.reachable);
+      const available = reachablePhases.length > 0 && ratedA > 0;
+      const maxA = available ? Math.max(...reachablePhases.map(p => p.current_a || 0)) : 0;
+      const pct = available ? Math.min(100, (maxA / ratedA) * 100) : 0;
+      section.appendChild(buildLoadRow("LOAD", pct, available));
     }
     return section;
   }
