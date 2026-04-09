@@ -1057,6 +1057,478 @@ def api_run_report(data: dict):
     }
 
 # ----------------------------
+# Custom Reporting (Prometheus + Grafana) — Graph Report PDF
+# ----------------------------
+#
+# Settings keys: prom_url, grafana_url, grafana_user, grafana_pass
+#
+# The Graph Report PDF combines:
+#   - Grafana panel renders (PNGs from /render/d-solo) — pixel-identical to live dashboards
+#   - matplotlib charts and tables built from direct Prometheus PromQL queries
+#
+# Prometheus is queried via /api/v1/query and /api/v1/query_range over HTTP.
+# matplotlib is imported lazily inside the endpoint so the module still loads
+# on hosts that haven't pip-installed it yet (the endpoint will return a clean
+# JSON error in that case).
+
+# Phase 0 lab cluster scope — used for the rack-scope picker on the Graph
+# Report form. Each entry is (display_label, server_label_regex_fragment).
+GRAPH_REPORT_CLUSTERS = [
+    ("R1C2", "r1c2s[1-4]"),
+    ("R2C3", "r2c3s[1-4]"),
+    ("R2C4", "r2c4s[1-4]"),
+    ("R2C5", "r2c5s[1-4]"),
+    ("R2C7", "r2c7s[1-4]"),
+    ("R2C8", "r2c8s[1-4]"),
+]
+ALL_CLUSTERS_REGEX = "r[12]c[2345678]s[1-4]"
+
+def _prom_query(prom_url: str, query: str, t: Optional[float] = None) -> List[dict]:
+    """Run an instant Prometheus query. Returns the .data.result list, or []."""
+    try:
+        params = {"query": query}
+        if t is not None:
+            params["time"] = f"{t:.3f}"
+        resp = req_lib.get(f"{prom_url.rstrip('/')}/api/v1/query", params=params, timeout=15)
+        if resp.status_code != 200:
+            logger.warning("prom query HTTP %d: %s", resp.status_code, query)
+            return []
+        return resp.json().get("data", {}).get("result", []) or []
+    except Exception as e:
+        logger.warning("prom query failed (%s): %s", query, e)
+        return []
+
+def _prom_query_range(prom_url: str, query: str, start: float, end: float, step: float) -> List[dict]:
+    """Run a Prometheus range query. Returns the .data.result list, or []."""
+    try:
+        params = {
+            "query": query,
+            "start": f"{start:.3f}",
+            "end": f"{end:.3f}",
+            "step": f"{int(max(step, 1))}s",
+        }
+        resp = req_lib.get(f"{prom_url.rstrip('/')}/api/v1/query_range", params=params, timeout=60)
+        if resp.status_code != 200:
+            logger.warning("prom query_range HTTP %d: %s", resp.status_code, query)
+            return []
+        return resp.json().get("data", {}).get("result", []) or []
+    except Exception as e:
+        logger.warning("prom query_range failed (%s): %s", query, e)
+        return []
+
+def _grafana_render_panel(grafana_url: str, user: str, pw: str, uid: str, panel_id: int,
+                           start_ms: int, end_ms: int, width: int = 1000, height: int = 360) -> Optional[bytes]:
+    """Fetch a rendered Grafana panel as PNG bytes via /render/d-solo. Returns None on failure."""
+    try:
+        url = f"{grafana_url.rstrip('/')}/render/d-solo/{uid}"
+        params = {
+            "panelId": panel_id,
+            "from": start_ms,
+            "to": end_ms,
+            "width": width,
+            "height": height,
+            "tz": "America/Denver",
+        }
+        auth = (user, pw) if user else None
+        resp = req_lib.get(url, params=params, auth=auth, timeout=30)
+        if resp.status_code == 200 and resp.headers.get("content-type", "").startswith("image/"):
+            return resp.content
+        logger.warning("grafana render HTTP %d (uid=%s panel=%d)", resp.status_code, uid, panel_id)
+        return None
+    except Exception as e:
+        logger.warning("grafana render failed (uid=%s panel=%d): %s", uid, panel_id, e)
+        return None
+
+@app.get("/api/settings/custom_reporting")
+def api_get_custom_reporting():
+    return {
+        "ok": True,
+        "prom_url": get_setting("prom_url", ""),
+        "grafana_url": get_setting("grafana_url", ""),
+        "grafana_user": get_setting("grafana_user", ""),
+        "has_grafana_pass": bool(get_setting("grafana_pass", "")),
+    }
+
+@app.post("/api/settings/custom_reporting")
+def api_set_custom_reporting(data: dict):
+    prom_url = (data.get("prom_url") or "").strip().rstrip("/")
+    grafana_url = (data.get("grafana_url") or "").strip().rstrip("/")
+    grafana_user = (data.get("grafana_user") or "").strip()
+    grafana_pass = (data.get("grafana_pass") or "").strip()
+    # Empty password = keep existing (lets the user edit URLs without retyping)
+    if not grafana_pass:
+        grafana_pass = get_setting("grafana_pass", "")
+    if not prom_url or not grafana_url or not grafana_user or not grafana_pass:
+        return {"ok": False, "error": "Prometheus URL, Grafana URL, username, and password all required"}
+    set_setting("prom_url", prom_url)
+    set_setting("grafana_url", grafana_url)
+    set_setting("grafana_user", grafana_user)
+    set_setting("grafana_pass", grafana_pass)
+    logger.info("Custom reporting config updated (prom=%s grafana=%s user=%s)", prom_url, grafana_url, grafana_user)
+    return {"ok": True}
+
+@app.post("/api/settings/custom_reporting/test")
+def api_test_custom_reporting(data: dict):
+    prom_url = (data.get("prom_url") or "").strip().rstrip("/") or get_setting("prom_url", "")
+    grafana_url = (data.get("grafana_url") or "").strip().rstrip("/") or get_setting("grafana_url", "")
+    grafana_user = (data.get("grafana_user") or "").strip() or get_setting("grafana_user", "")
+    grafana_pass = (data.get("grafana_pass") or "").strip() or get_setting("grafana_pass", "")
+    if not prom_url or not grafana_url or not grafana_user or not grafana_pass:
+        return {"ok": False, "error": "Need Prometheus URL, Grafana URL, username, and password"}
+    # Probe Prometheus
+    try:
+        r = req_lib.get(f"{prom_url}/api/v1/status/buildinfo", timeout=10)
+        if r.status_code != 200:
+            return {"ok": False, "error": f"Prometheus unreachable (HTTP {r.status_code})"}
+        prom_version = r.json().get("data", {}).get("version", "?")
+    except Exception as e:
+        return {"ok": False, "error": f"Prometheus error: {e}"}
+    # Probe Grafana — health (no auth) + auth-gated dashboard list
+    try:
+        r = req_lib.get(f"{grafana_url}/api/health", timeout=10)
+        if r.status_code != 200:
+            return {"ok": False, "error": f"Grafana unreachable (HTTP {r.status_code})"}
+        graf_version = r.json().get("version", "?")
+        r2 = req_lib.get(
+            f"{grafana_url}/api/search",
+            params={"type": "dash-db", "limit": 1},
+            auth=(grafana_user, grafana_pass),
+            timeout=10,
+        )
+        if r2.status_code == 401 or r2.status_code == 403:
+            return {"ok": False, "error": "Grafana auth failed (bad username/password)"}
+        if r2.status_code != 200:
+            return {"ok": False, "error": f"Grafana auth probe failed (HTTP {r2.status_code})"}
+    except Exception as e:
+        return {"ok": False, "error": f"Grafana error: {e}"}
+    return {"ok": True, "prom_version": prom_version, "grafana_version": graf_version}
+
+@app.get("/api/reports/graph")
+def api_graph_report(start: int = 0, end: int = 0, clusters: str = ""):
+    """Generate the Graph Report PDF.
+
+    Query params:
+      start, end  — unix epoch seconds (required, end > start)
+      clusters    — comma-separated cluster labels (e.g. "R1C2,R2C3"); empty = all
+    """
+    from fastapi.responses import Response, JSONResponse
+    import io
+    import time as _time
+
+    if not start or not end or end <= start:
+        return JSONResponse({"ok": False, "error": "Invalid start/end (require unix seconds, end > start)"}, status_code=400)
+
+    prom_url = get_setting("prom_url", "")
+    grafana_url = get_setting("grafana_url", "")
+    grafana_user = get_setting("grafana_user", "")
+    grafana_pass = get_setting("grafana_pass", "")
+    if not prom_url or not grafana_url:
+        return JSONResponse(
+            {"ok": False, "error": "Custom reporting not configured. Open Settings → Configure Custom Reporting."},
+            status_code=400,
+        )
+
+    # Lazy matplotlib import so this module still loads on hosts without matplotlib.
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from matplotlib.backends.backend_pdf import PdfPages
+        import matplotlib.dates as mdates
+    except ImportError:
+        return JSONResponse(
+            {"ok": False, "error": "matplotlib not installed on this host. Run: pip install matplotlib"},
+            status_code=500,
+        )
+
+    # Resolve cluster scope
+    requested = [c.strip() for c in (clusters or "").split(",") if c.strip()]
+    selected_clusters = [(label, regex) for (label, regex) in GRAPH_REPORT_CLUSTERS
+                         if not requested or label in requested]
+    if not selected_clusters:
+        selected_clusters = list(GRAPH_REPORT_CLUSTERS)
+    scope_regex = "|".join(f"({r})" for _, r in selected_clusters)
+
+    duration_s = end - start
+    # Step picked so each panel has roughly 300–600 points; floor at 30s (scrape interval)
+    step = max(30, int(duration_s / 500))
+
+    start_ms = start * 1000
+    end_ms = end * 1000
+
+    pdf_buf = io.BytesIO()
+    pages_written = 0
+    warnings: List[str] = []
+
+    with PdfPages(pdf_buf) as pdf:
+
+        # ---------- Page 1: Cover ----------
+        cover_q = {
+            "lab_kw_now":   f'sum(power{{sensor="total",server=~"{scope_regex}"}}) / 1000',
+            "server_count": f'count(power{{sensor="total",server=~"{scope_regex}"}})',
+            "nv_gpu_count": 'count(DCGM_FI_DEV_POWER_USAGE{job!="local-gpu"})',
+            "amd_gpu_count":'count(gpu_health)',
+            "lab_kwh":      f'(sum(increase(DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION[{duration_s}s]))) / 3.6e12',
+            "peak_lab_kw":  f'max_over_time((sum(power{{sensor="total",server=~"{scope_regex}"}}))[{duration_s}s:{step}s]) / 1000',
+        }
+        cover_vals = {}
+        for k, q in cover_q.items():
+            res = _prom_query(prom_url, q, t=end)
+            if res:
+                try:
+                    cover_vals[k] = float(res[0]["value"][1])
+                except Exception:
+                    cover_vals[k] = None
+            else:
+                cover_vals[k] = None
+
+        fig = plt.figure(figsize=(8.5, 11))
+        fig.text(0.5, 0.92, "Power Graph Report", ha="center", fontsize=22, fontweight="bold")
+        fig.text(0.5, 0.88, get_setting("dashboard_title", DEFAULT_DASH_TITLE), ha="center", fontsize=12, color="#444")
+        start_str = _time.strftime("%Y-%m-%d %H:%M %Z", _time.localtime(start))
+        end_str   = _time.strftime("%Y-%m-%d %H:%M %Z", _time.localtime(end))
+        fig.text(0.5, 0.83, f"{start_str}   →   {end_str}", ha="center", fontsize=11)
+        fig.text(0.5, 0.80, f"Window: {duration_s/3600:.1f} hours    Scope: {', '.join(label for label,_ in selected_clusters)}",
+                 ha="center", fontsize=10, color="#555")
+
+        def _fmt(v, suffix="", nd=2):
+            if v is None: return "—"
+            return f"{v:,.{nd}f}{suffix}"
+
+        # Big stat cards
+        cards = [
+            ("Lab Power (now)",   _fmt(cover_vals.get("lab_kw_now"), " kW")),
+            ("Peak Lab Power",    _fmt(cover_vals.get("peak_lab_kw"), " kW")),
+            ("GPU Energy (window)", _fmt(cover_vals.get("lab_kwh"), " kWh")),
+            ("Servers in Scope",  _fmt(cover_vals.get("server_count"), "", nd=0)),
+            ("NVIDIA GPUs",       _fmt(cover_vals.get("nv_gpu_count"), "", nd=0)),
+            ("AMD GPUs",          _fmt(cover_vals.get("amd_gpu_count"), "", nd=0)),
+        ]
+        # 2 columns x 3 rows of cards
+        for i, (label, val) in enumerate(cards):
+            row = i // 2
+            col = i % 2
+            x = 0.10 + col * 0.45
+            y = 0.62 - row * 0.13
+            fig.text(x, y, label, fontsize=10, color="#666")
+            fig.text(x, y - 0.04, val, fontsize=18, fontweight="bold", color="#1e3a8a")
+
+        fig.text(0.5, 0.10, f"Generated {_time.strftime('%Y-%m-%d %H:%M:%S %Z')}",
+                 ha="center", fontsize=8, color="#888")
+        pdf.savefig(fig); plt.close(fig); pages_written += 1
+
+        # ---------- Page 2: Lab total power timeline (Grafana render) ----------
+        # Lab Summary uid → "Total Server Power" panel id 6
+        png = _grafana_render_panel(grafana_url, grafana_user, grafana_pass,
+                                    "97551388-ac8a-45e2-bdb4-be9422d14a84", 6,
+                                    start_ms, end_ms, width=1100, height=420)
+        fig = plt.figure(figsize=(8.5, 11))
+        fig.text(0.5, 0.95, "Lab — Total Server Power", ha="center", fontsize=16, fontweight="bold")
+        fig.text(0.5, 0.92, "Source: Grafana / Lab Summary", ha="center", fontsize=9, color="#666")
+        if png:
+            try:
+                import matplotlib.image as mpimg
+                img = mpimg.imread(io.BytesIO(png), format="png")
+                ax = fig.add_axes([0.05, 0.45, 0.90, 0.45])
+                ax.imshow(img); ax.axis("off")
+            except Exception as e:
+                fig.text(0.5, 0.6, f"(failed to embed render: {e})", ha="center", color="red")
+                warnings.append(f"lab total render embed: {e}")
+        else:
+            fig.text(0.5, 0.6, "(Grafana render unavailable)", ha="center", color="#a00")
+            warnings.append("lab total render: unavailable")
+
+        # Below the render: a matplotlib mini-summary from Prometheus
+        series = _prom_query_range(prom_url,
+            f'sum(power{{sensor="total",server=~"{scope_regex}"}}) / 1000',
+            start, end, step)
+        if series:
+            ax2 = fig.add_axes([0.10, 0.10, 0.80, 0.28])
+            for s in series:
+                xs = [_time.localtime(float(p[0])) for p in s["values"]]
+                xs_dt = [_time.strftime("%H:%M", t) for t in xs]
+                ys = [float(p[1]) for p in s["values"]]
+                ax2.plot(range(len(ys)), ys, linewidth=1.2, color="#1e40af")
+                # Sparse x labels: show 6 ticks
+                if len(xs_dt) > 6:
+                    idxs = [int(i*(len(xs_dt)-1)/5) for i in range(6)]
+                    ax2.set_xticks(idxs)
+                    ax2.set_xticklabels([xs_dt[i] for i in idxs], fontsize=7)
+            ax2.set_title("Prometheus query: sum(power{sensor=\"total\"}) / 1000", fontsize=9)
+            ax2.set_ylabel("kW", fontsize=9)
+            ax2.grid(True, alpha=0.3)
+        pdf.savefig(fig); plt.close(fig); pages_written += 1
+
+        # ---------- Page 3: Per-cluster timelines (Grafana renders, one per page) ----------
+        # Each cluster summary dashboard has uid + panelId for its kW timeseries.
+        # R1C2 confirmed: uid 12447112-..., panel 8 ("Total R1C2 Server Power (kW)")
+        # The other clusters mirror the structure but have their own uids — we
+        # fall back to a Prometheus matplotlib chart if a render is unavailable.
+        cluster_grafana = {
+            "R1C2": ("12447112-0fea-4f17-bf12-1295ac7c6812", 8),
+        }
+        for label, regex in selected_clusters:
+            fig = plt.figure(figsize=(8.5, 11))
+            fig.text(0.5, 0.95, f"Cluster {label} — Server Power", ha="center", fontsize=16, fontweight="bold")
+            embedded = False
+            if label in cluster_grafana:
+                uid, pid = cluster_grafana[label]
+                png = _grafana_render_panel(grafana_url, grafana_user, grafana_pass, uid, pid,
+                                            start_ms, end_ms, width=1100, height=460)
+                if png:
+                    try:
+                        import matplotlib.image as mpimg
+                        img = mpimg.imread(io.BytesIO(png), format="png")
+                        ax = fig.add_axes([0.05, 0.40, 0.90, 0.50])
+                        ax.imshow(img); ax.axis("off")
+                        fig.text(0.5, 0.92, "Source: Grafana / Cluster Summary", ha="center", fontsize=9, color="#666")
+                        embedded = True
+                    except Exception as e:
+                        warnings.append(f"{label} render embed: {e}")
+            if not embedded:
+                fig.text(0.5, 0.92, "Source: Prometheus (Grafana render unavailable)", ha="center", fontsize=9, color="#a06")
+                ax = fig.add_axes([0.10, 0.40, 0.80, 0.50])
+                series = _prom_query_range(prom_url,
+                    f'power{{sensor="total",server=~"{regex}"}}',
+                    start, end, step)
+                for s in series:
+                    srv = s["metric"].get("server", "?")
+                    ys = [float(p[1]) for p in s["values"]]
+                    ax.plot(range(len(ys)), ys, linewidth=1.0, label=srv)
+                ax.set_ylabel("Watts")
+                ax.grid(True, alpha=0.3)
+                ax.legend(fontsize=7, loc="upper right", ncol=2)
+
+            # kWh stat for this cluster
+            kwh_res = _prom_query(prom_url,
+                f'(sum(increase(power{{sensor="total",server=~"{regex}"}}[{duration_s}s]))) / 3600 / 1000',
+                t=end)
+            kwh_val = None
+            if kwh_res:
+                try: kwh_val = float(kwh_res[0]["value"][1])
+                except Exception: pass
+            fig.text(0.5, 0.32, f"Cluster Energy: {_fmt(kwh_val, ' kWh')}",
+                     ha="center", fontsize=12, fontweight="bold", color="#1e3a8a")
+            pdf.savefig(fig); plt.close(fig); pages_written += 1
+
+        # ---------- Page N: Per-server table ----------
+        avg_res = _prom_query(prom_url, f'avg_over_time(power{{sensor="total",server=~"{scope_regex}"}}[{duration_s}s])', t=end)
+        max_res = _prom_query(prom_url, f'max_over_time(power{{sensor="total",server=~"{scope_regex}"}}[{duration_s}s])', t=end)
+        kwh_res = _prom_query(prom_url, f'(sum_over_time(power{{sensor="total",server=~"{scope_regex}"}}[{duration_s}s])) * {step} / 3600 / 1000', t=end)
+        # That last query is approximate — better: use increase on energy counter if available.
+        # We'll fall back to integrating the gauge for chassis power since Prom doesn't expose a chassis Wh counter.
+        avg_by_srv = {r["metric"].get("server","?"): float(r["value"][1]) for r in avg_res}
+        max_by_srv = {r["metric"].get("server","?"): float(r["value"][1]) for r in max_res}
+        # Per-server kWh: integrate watts → Wh by avg_w * duration_h
+        srv_rows = []
+        total_kwh = 0.0
+        for srv, avg_w in avg_by_srv.items():
+            kwh = avg_w * (duration_s / 3600.0) / 1000.0
+            total_kwh += kwh
+            srv_rows.append((srv, avg_w, max_by_srv.get(srv, 0.0), kwh))
+        srv_rows.sort(key=lambda r: r[3], reverse=True)
+
+        fig = plt.figure(figsize=(8.5, 11))
+        fig.text(0.5, 0.95, "Per-Server Power Summary", ha="center", fontsize=16, fontweight="bold")
+        fig.text(0.5, 0.92, f"Window: {duration_s/3600:.1f} h   |   Total: {total_kwh:,.2f} kWh", ha="center", fontsize=10, color="#555")
+        ax = fig.add_axes([0.05, 0.05, 0.90, 0.85])
+        ax.axis("off")
+        table_data = [["Server", "Avg W", "Peak W", "kWh", "% of Total"]]
+        for srv, a, m, k in srv_rows:
+            pct = (k/total_kwh*100) if total_kwh > 0 else 0
+            table_data.append([srv, f"{a:,.0f}", f"{m:,.0f}", f"{k:,.2f}", f"{pct:.1f}%"])
+        if len(table_data) > 1:
+            tbl = ax.table(cellText=table_data, loc="upper center", cellLoc="center", colWidths=[0.20,0.15,0.15,0.15,0.15])
+            tbl.auto_set_font_size(False); tbl.set_fontsize(9); tbl.scale(1, 1.4)
+            for c in range(5):
+                tbl[(0,c)].set_facecolor("#1e40af"); tbl[(0,c)].set_text_props(color="white", fontweight="bold")
+        else:
+            fig.text(0.5, 0.5, "(no per-server data returned)", ha="center", color="#a00")
+        pdf.savefig(fig); plt.close(fig); pages_written += 1
+
+        # ---------- Page N+1: GPU energy summary + top-10 ----------
+        # Total NV GPU energy in window from monotonic counter
+        nv_kwh_res = _prom_query(prom_url,
+            f'(sum(increase(DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION[{duration_s}s]))) / 3.6e12', t=end)
+        nv_total_kwh = float(nv_kwh_res[0]["value"][1]) if nv_kwh_res else 0.0
+
+        # Top-10 GPUs by energy in window
+        top_q = (f'topk(10, sum by(Hostname,gpu) '
+                 f'(increase(DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION[{duration_s}s]))) / 3.6e9')  # → kWh
+        top_res = _prom_query(prom_url, top_q, t=end)
+        gpu_rows = []
+        for r in top_res:
+            host = r["metric"].get("Hostname", "?")
+            gpu = r["metric"].get("gpu", "?")
+            try:
+                kwh = float(r["value"][1])
+            except Exception:
+                kwh = 0.0
+            gpu_rows.append((host, gpu, kwh))
+        gpu_rows.sort(key=lambda r: r[2], reverse=True)
+
+        fig = plt.figure(figsize=(8.5, 11))
+        fig.text(0.5, 0.95, "GPU Energy Summary", ha="center", fontsize=16, fontweight="bold")
+        fig.text(0.5, 0.91, f"Total NVIDIA GPU energy in window: {nv_total_kwh:,.2f} kWh",
+                 ha="center", fontsize=12, color="#1e3a8a", fontweight="bold")
+
+        # Top-10 horizontal bar
+        if gpu_rows:
+            ax = fig.add_axes([0.18, 0.42, 0.75, 0.42])
+            labels = [f"{h} GPU{g}" for (h,g,_) in gpu_rows]
+            vals = [k for (_,_,k) in gpu_rows]
+            ypos = list(range(len(labels)))[::-1]
+            ax.barh(ypos, vals, color="#1e40af")
+            ax.set_yticks(ypos); ax.set_yticklabels(labels, fontsize=8)
+            ax.set_xlabel("kWh in window", fontsize=9)
+            ax.set_title("Top 10 NVIDIA GPUs by Energy", fontsize=10)
+            ax.grid(True, axis="x", alpha=0.3)
+        else:
+            fig.text(0.5, 0.5, "(no GPU energy data)", ha="center", color="#a00")
+        pdf.savefig(fig); plt.close(fig); pages_written += 1
+
+        # ---------- Page N+2: Thermals appendix ----------
+        in_res = _prom_query(prom_url, f'max_over_time(temperature{{sensor="Inlet_F",server=~"{scope_regex}"}}[{duration_s}s])', t=end)
+        ex_res = _prom_query(prom_url, f'max_over_time(temperature{{sensor="Exhaust_F",server=~"{scope_regex}"}}[{duration_s}s])', t=end)
+        in_by = {r["metric"].get("server","?"): float(r["value"][1]) for r in in_res}
+        ex_by = {r["metric"].get("server","?"): float(r["value"][1]) for r in ex_res}
+        all_servers_set = sorted(set(in_by) | set(ex_by))
+
+        fig = plt.figure(figsize=(8.5, 11))
+        fig.text(0.5, 0.95, "Thermals Appendix", ha="center", fontsize=16, fontweight="bold")
+        fig.text(0.5, 0.92, f"Max inlet / exhaust temperatures over the window (°F)", ha="center", fontsize=10, color="#555")
+        ax = fig.add_axes([0.05, 0.05, 0.90, 0.85]); ax.axis("off")
+        td = [["Server", "Max Inlet °F", "Max Exhaust °F"]]
+        for srv in all_servers_set:
+            td.append([srv, f"{in_by.get(srv,0):.1f}", f"{ex_by.get(srv,0):.1f}"])
+        if len(td) > 1:
+            tbl = ax.table(cellText=td, loc="upper center", cellLoc="center", colWidths=[0.30,0.25,0.25])
+            tbl.auto_set_font_size(False); tbl.set_fontsize(9); tbl.scale(1, 1.5)
+            for c in range(3):
+                tbl[(0,c)].set_facecolor("#1e40af"); tbl[(0,c)].set_text_props(color="white", fontweight="bold")
+        else:
+            fig.text(0.5, 0.5, "(no temperature data)", ha="center", color="#a00")
+        pdf.savefig(fig); plt.close(fig); pages_written += 1
+
+        # PDF metadata
+        d = pdf.infodict()
+        d["Title"] = f"COS Power Graph Report {start_str} to {end_str}"
+        d["Author"] = "cospowerdash"
+        d["Subject"] = "Power graph report"
+
+    pdf_buf.seek(0)
+    fn_start = _time.strftime("%Y-%m-%d_%H%M", _time.localtime(start))
+    fn_end   = _time.strftime("%Y-%m-%d_%H%M", _time.localtime(end))
+    filename = f"cospower_graph_report_{fn_start}_to_{fn_end}.pdf"
+    headers = {
+        "Content-Disposition": f'inline; filename="{filename}"',
+        "X-Report-Pages": str(pages_written),
+    }
+    if warnings:
+        headers["X-Report-Warnings"] = "; ".join(warnings)[:500]
+    return Response(content=pdf_buf.getvalue(), media_type="application/pdf", headers=headers)
+
+# ----------------------------
 # Systems API
 # ----------------------------
 
@@ -1953,6 +2425,9 @@ def ui():
         <button onclick="openIdracDialog()" style="flex:1;padding:10px 14px;font-size:13px;background:rgba(37,99,235,0.3);color:#93c5fd;border:1px solid rgba(37,99,235,0.3);border-radius:10px;cursor:pointer;font-weight:700">Configure iDRAC</button>
         <button onclick="openOmeDialog()" style="flex:1;padding:10px 14px;font-size:13px;background:rgba(37,99,235,0.3);color:#93c5fd;border:1px solid rgba(37,99,235,0.3);border-radius:10px;cursor:pointer;font-weight:700">Configure OME</button>
       </div>
+      <div style="margin-top:8px;display:flex;gap:8px">
+        <button onclick="openCustomReportingDialog()" style="flex:1;padding:10px 14px;font-size:13px;background:rgba(37,99,235,0.3);color:#93c5fd;border:1px solid rgba(37,99,235,0.3);border-radius:10px;cursor:pointer;font-weight:700">Configure Custom Reporting</button>
+      </div>
       <div class="row" style="margin-top:12px">
         <button class="primary" onclick="saveSettings()">Save</button>
         <button onclick="closeSettings()">Cancel</button>
@@ -2003,6 +2478,32 @@ def ui():
     </div>
   </div>
 
+  <!-- Custom Reporting Configuration Modal -->
+  <div class="modal" id="customReportingModal">
+    <div class="modal-content">
+      <h3>Configure Custom Reporting</h3>
+      <div style="font-size:12px;color:rgba(148,163,184,0.85);margin-bottom:10px">Used by the Reports → Graph Report feature. Pulls panel renders from Grafana and time-series data from Prometheus.</div>
+      <div style="margin-bottom:4px"><span style="color:#cbd5e1;font-weight:600">Prometheus URL:</span></div>
+      <input id="crPromUrl" placeholder="http://prometheus.ailab" style="margin-bottom:8px" />
+      <div style="margin-bottom:4px"><span style="color:#cbd5e1;font-weight:600">Grafana URL:</span></div>
+      <input id="crGrafanaUrl" placeholder="http://dashboard.ailab" style="margin-bottom:8px" />
+      <div style="margin-bottom:4px"><span style="color:#cbd5e1;font-weight:600">Grafana Credentials:</span></div>
+      <div style="display:flex;gap:8px;margin-bottom:8px">
+        <input id="crGrafanaUser" placeholder="Username" style="flex:1;margin-bottom:0" />
+        <input id="crGrafanaPass" type="password" placeholder="Password" style="flex:1;margin-bottom:0" />
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+        <button onclick="testCustomReporting()" style="white-space:nowrap;padding:10px 14px;font-size:13px;background:rgba(37,99,235,0.3);color:#93c5fd;border:1px solid rgba(37,99,235,0.3);border-radius:10px;cursor:pointer;font-weight:700">Test Connection</button>
+        <span id="crTestResult" style="font-size:13px;font-weight:700"></span>
+      </div>
+      <div style="font-size:12px;color:rgba(148,163,184,0.85);margin-bottom:6px">A successful Test connection is required before saving.</div>
+      <div class="row" style="margin-top:12px">
+        <button id="crSaveBtn" class="primary disabled" onclick="saveCustomReportingDialog()">Save</button>
+        <button onclick="closeCustomReportingDialog()">Cancel</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Reports Modal -->
   <div class="modal" id="reportsModal">
     <div id="reportsContent" class="modal-content" style="max-height:85vh;display:flex;flex-direction:column">
@@ -2021,6 +2522,47 @@ def ui():
         <select id="reportSelect" style="width:100%;padding:10px;border-radius:10px;border:1px solid rgba(255,255,255,0.16);background:#0b1220;color:white;font-size:14px;margin-bottom:10px"></select>
         <div class="row">
           <button class="primary" onclick="runReport()">Generate</button>
+          <button onclick="openGraphReportForm()">Graph Report</button>
+          <button onclick="closeReports()">Cancel</button>
+        </div>
+      </div>
+      <div id="graphReportForm" style="display:none">
+        <div style="margin-bottom:8px"><span style="color:#cbd5e1;font-weight:600">Graph Report</span></div>
+        <div style="font-size:12px;color:rgba(148,163,184,0.85);margin-bottom:10px">Generates a PDF combining Grafana panel renders and Prometheus charts for the selected window.</div>
+        <div style="margin-bottom:8px"><span style="color:#cbd5e1;font-weight:600">Time Range:</span></div>
+        <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:10px">
+          <label style="cursor:pointer"><input type="radio" name="grRange" value="24h" checked /> Last 24 hours</label>
+          <label style="cursor:pointer"><input type="radio" name="grRange" value="7d" /> Last 7 days</label>
+          <label style="cursor:pointer"><input type="radio" name="grRange" value="30d" /> Last 30 days</label>
+          <label style="cursor:pointer"><input type="radio" name="grRange" value="custom" /> Custom range</label>
+        </div>
+        <div id="grCustomRange" style="display:none;margin-bottom:10px;padding:10px;border:1px solid rgba(255,255,255,0.12);border-radius:8px;background:rgba(255,255,255,0.02)">
+          <div style="display:flex;gap:8px;align-items:center;margin-bottom:6px">
+            <span style="color:#cbd5e1;font-size:13px;width:50px">Start:</span>
+            <input id="grStartDt" type="datetime-local" step="3600" style="flex:1;margin-bottom:0" />
+          </div>
+          <div style="display:flex;gap:8px;align-items:center">
+            <span style="color:#cbd5e1;font-size:13px;width:50px">End:</span>
+            <input id="grEndDt" type="datetime-local" step="3600" style="flex:1;margin-bottom:0" />
+          </div>
+          <div style="font-size:11px;color:rgba(148,163,184,0.7);margin-top:6px">Hour resolution. Up to 90 days back.</div>
+        </div>
+        <div style="margin-bottom:6px"><span style="color:#cbd5e1;font-weight:600">Scope:</span></div>
+        <div style="margin-bottom:6px">
+          <label style="cursor:pointer"><input type="checkbox" id="grAllRacks" checked onchange="toggleGrAllRacks()" /> All racks</label>
+        </div>
+        <div id="grRackList" style="display:flex;flex-wrap:wrap;gap:6px 14px;margin-bottom:10px;padding-left:18px">
+          <label style="cursor:pointer"><input type="checkbox" class="grCluster" value="R1C2" disabled /> R1C2</label>
+          <label style="cursor:pointer"><input type="checkbox" class="grCluster" value="R2C3" disabled /> R2C3</label>
+          <label style="cursor:pointer"><input type="checkbox" class="grCluster" value="R2C4" disabled /> R2C4</label>
+          <label style="cursor:pointer"><input type="checkbox" class="grCluster" value="R2C5" disabled /> R2C5</label>
+          <label style="cursor:pointer"><input type="checkbox" class="grCluster" value="R2C7" disabled /> R2C7</label>
+          <label style="cursor:pointer"><input type="checkbox" class="grCluster" value="R2C8" disabled /> R2C8</label>
+        </div>
+        <div id="grError" style="color:#f87171;font-size:13px;font-weight:700;margin-bottom:8px;min-height:0"></div>
+        <div class="row">
+          <button class="primary" onclick="generateGraphReport()">Generate</button>
+          <button onclick="backToReportSelect()">Back</button>
           <button onclick="closeReports()">Cancel</button>
         </div>
       </div>
@@ -2569,6 +3111,17 @@ def ui():
     document.getElementById("omePass").addEventListener("focus", function() {
       if (this.dataset.unchanged === "true") { this.value = ""; this.dataset.unchanged = "false"; }
     });
+    document.getElementById("crGrafanaPass").addEventListener("focus", function() {
+      if (this.dataset.unchanged === "true") { this.value = ""; this.dataset.unchanged = "false"; }
+    });
+    // Any edit to Custom Reporting fields invalidates the prior Test result
+    ["crPromUrl", "crGrafanaUrl", "crGrafanaUser", "crGrafanaPass"].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.addEventListener("input", function() {
+        document.getElementById("crTestResult").textContent = "";
+        setCrSaveEnabled(false);
+      });
+    });
     // Any edit to iDRAC fields invalidates the prior Test result
     ["idracUser", "idracPass", "idracTestIp"].forEach(id => {
       document.getElementById(id).addEventListener("input", invalidateIdracTest);
@@ -3108,6 +3661,85 @@ def ui():
     } catch(e) { result.textContent = "Test failed"; result.style.color = "#f87171"; }
   }
 
+  // ---------------- Custom Reporting (Prometheus + Grafana) ----------------
+  function setCrSaveEnabled(enabled) {
+    const btn = document.getElementById("crSaveBtn");
+    if (!btn) return;
+    if (enabled) btn.classList.remove("disabled");
+    else btn.classList.add("disabled");
+  }
+
+  async function openCustomReportingDialog() {
+    let promUrl = "", grafUrl = "", grafUser = "", hasPass = false;
+    try {
+      const r = await fetch("/api/settings/custom_reporting");
+      const d = await r.json();
+      if (d && d.ok) {
+        promUrl = d.prom_url || "";
+        grafUrl = d.grafana_url || "";
+        grafUser = d.grafana_user || "";
+        hasPass = !!d.has_grafana_pass;
+      }
+    } catch(e) {}
+    document.getElementById("crPromUrl").value = promUrl;
+    document.getElementById("crGrafanaUrl").value = grafUrl;
+    document.getElementById("crGrafanaUser").value = grafUser;
+    const passEl = document.getElementById("crGrafanaPass");
+    passEl.value = hasPass ? "********" : "";
+    passEl.dataset.unchanged = hasPass ? "true" : "false";
+    document.getElementById("crTestResult").textContent = "";
+    setCrSaveEnabled(false);
+    document.getElementById("customReportingModal").style.display = "flex";
+  }
+
+  function closeCustomReportingDialog() {
+    document.getElementById("customReportingModal").style.display = "none";
+  }
+
+  async function testCustomReporting() {
+    setCrSaveEnabled(false);
+    const promUrl = document.getElementById("crPromUrl").value.trim();
+    const grafUrl = document.getElementById("crGrafanaUrl").value.trim();
+    const grafUser = document.getElementById("crGrafanaUser").value.trim();
+    const passEl = document.getElementById("crGrafanaPass");
+    const grafPass = passEl.dataset.unchanged === "true" ? "" : passEl.value.trim();
+    const result = document.getElementById("crTestResult");
+    if (!promUrl || !grafUrl || !grafUser || (!grafPass && passEl.dataset.unchanged !== "true")) {
+      result.textContent = "Fill in all fields"; result.style.color = "#f87171"; return;
+    }
+    result.textContent = "Testing..."; result.style.color = "#94a3b8";
+    try {
+      const body = {prom_url: promUrl, grafana_url: grafUrl, grafana_user: grafUser, grafana_pass: grafPass || ""};
+      const res = await fetch("/api/settings/custom_reporting/test", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+      const data = await res.json();
+      if (data.ok) {
+        result.textContent = `OK — Prom v${data.prom_version || "?"}, Grafana v${data.grafana_version || "?"}`;
+        result.style.color = "#22c55e";
+        setCrSaveEnabled(true);
+      } else {
+        result.textContent = data.error || "Test failed"; result.style.color = "#f87171";
+      }
+    } catch(e) { result.textContent = "Test failed"; result.style.color = "#f87171"; }
+  }
+
+  async function saveCustomReportingDialog() {
+    const btn = document.getElementById("crSaveBtn");
+    if (btn.classList.contains("disabled")) return;
+    const promUrl = document.getElementById("crPromUrl").value.trim();
+    const grafUrl = document.getElementById("crGrafanaUrl").value.trim();
+    const grafUser = document.getElementById("crGrafanaUser").value.trim();
+    const passEl = document.getElementById("crGrafanaPass");
+    // If user didn't touch the password, send empty -> backend keeps the stored value.
+    const grafPass = passEl.dataset.unchanged === "true" ? "" : passEl.value.trim();
+    try {
+      await fetch("/api/settings/custom_reporting", {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({prom_url: promUrl, grafana_url: grafUrl, grafana_user: grafUser, grafana_pass: grafPass})
+      });
+    } catch(e) {}
+    closeCustomReportingDialog();
+  }
+
   // ---------------- Reports ----------------
   async function openReports() {
     const modal = document.getElementById("reportsModal");
@@ -3534,10 +4166,81 @@ def ui():
     document.getElementById("reportsContent").style.maxWidth = "";
     document.getElementById("reportsResults").style.display = "none";
     document.getElementById("reportsActions").style.display = "none";
+    document.getElementById("graphReportForm").style.display = "none";
     document.getElementById("reportsSelector").style.display = "block";
     document.getElementById("reportsHumanView").innerHTML = "";
     document.getElementById("reportsTableWrapper").style.display = "none";
     document.getElementById("reportsHumanView").style.display = "none";
+  }
+
+  // ---------------- Graph Report (Prometheus + Grafana) ----------------
+  function openGraphReportForm() {
+    document.getElementById("reportsSelector").style.display = "none";
+    document.getElementById("reportsResults").style.display = "none";
+    document.getElementById("reportsActions").style.display = "none";
+    document.getElementById("graphReportForm").style.display = "block";
+    document.getElementById("grError").textContent = "";
+    // Default custom range to "last 24h" formatted for datetime-local inputs
+    const now = new Date();
+    const yest = new Date(now.getTime() - 24*3600*1000);
+    const fmt = (d) => {
+      const pad = (n) => String(n).padStart(2, "0");
+      return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:00`;
+    };
+    document.getElementById("grStartDt").value = fmt(yest);
+    document.getElementById("grEndDt").value = fmt(now);
+    // Wire up the radio change handler
+    document.querySelectorAll('input[name="grRange"]').forEach(el => {
+      el.onchange = () => {
+        const isCustom = document.querySelector('input[name="grRange"]:checked').value === "custom";
+        document.getElementById("grCustomRange").style.display = isCustom ? "block" : "none";
+      };
+    });
+  }
+
+  function toggleGrAllRacks() {
+    const all = document.getElementById("grAllRacks").checked;
+    document.querySelectorAll(".grCluster").forEach(el => {
+      el.disabled = all;
+      if (all) el.checked = false;
+    });
+  }
+
+  async function generateGraphReport() {
+    const errEl = document.getElementById("grError");
+    errEl.textContent = "";
+    const range = document.querySelector('input[name="grRange"]:checked').value;
+    let startSec, endSec;
+    const nowSec = Math.floor(Date.now() / 1000);
+    if (range === "24h") { endSec = nowSec; startSec = nowSec - 24*3600; }
+    else if (range === "7d") { endSec = nowSec; startSec = nowSec - 7*86400; }
+    else if (range === "30d") { endSec = nowSec; startSec = nowSec - 30*86400; }
+    else {
+      const s = document.getElementById("grStartDt").value;
+      const e = document.getElementById("grEndDt").value;
+      if (!s || !e) { errEl.textContent = "Pick start and end date/time"; return; }
+      startSec = Math.floor(new Date(s).getTime() / 1000);
+      endSec = Math.floor(new Date(e).getTime() / 1000);
+      if (endSec <= startSec) { errEl.textContent = "End must be after start"; return; }
+    }
+    let clusters = "";
+    if (!document.getElementById("grAllRacks").checked) {
+      const picked = Array.from(document.querySelectorAll(".grCluster:checked")).map(el => el.value);
+      if (picked.length === 0) { errEl.textContent = "Pick at least one rack, or check All racks"; return; }
+      clusters = picked.join(",");
+    }
+    // Quick precheck: confirm custom reporting is configured before opening a tab
+    try {
+      const cr = await fetch("/api/settings/custom_reporting");
+      const crd = await cr.json();
+      if (!crd.ok || !crd.prom_url || !crd.grafana_url) {
+        errEl.textContent = "Configure Custom Reporting in Settings first";
+        return;
+      }
+    } catch(e) { errEl.textContent = "Could not check reporting settings"; return; }
+    const params = new URLSearchParams({start: startSec, end: endSec});
+    if (clusters) params.set("clusters", clusters);
+    window.open("/api/reports/graph?" + params.toString(), "_blank");
   }
 
   // CSV download for the currently rendered report. Reads the live
