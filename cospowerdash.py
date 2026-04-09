@@ -1336,7 +1336,7 @@ def ui():
     /* Fixed-size section so 1-PDU and 2-PDU racks render identical
        load boxes. Phase blocks above absorb any extra vertical space. */
     flex: 0 0 auto;
-    height: clamp(22px, 7.5cqi, 56px);
+    height: clamp(40px, 13cqi, 100px);
     margin-top: 4px;
     padding: 4px 7px;
     border-top: 2px solid rgba(167,139,250,0.55);
@@ -1349,7 +1349,7 @@ def ui():
     box-sizing: border-box;
   }
   .pdu-load-section.split {
-    height: clamp(56px, 21cqi, 150px);
+    height: clamp(100px, 38cqi, 270px);
     gap: 3px;
   }
   .pdu-load-row {
@@ -1376,7 +1376,7 @@ def ui():
     min-width: 0;
     /* Fixed thickness driven by rack WIDTH only, so bars look identical
        on 1-PDU and 2-PDU racks regardless of how tall the section is. */
-    height: clamp(9px, 2.6cqi, 22px);
+    height: clamp(18px, 5.2cqi, 44px);
     display: flex;
     gap: 0;
   }
@@ -2069,7 +2069,7 @@ def ui():
     return "green";
   }
 
-  const PDU_LOAD_SEGMENTS = 20;
+  const PDU_LOAD_SEGMENTS = 30;
 
   function buildSegmentedTrack(pct, available) {
     const track = document.createElement("div");
