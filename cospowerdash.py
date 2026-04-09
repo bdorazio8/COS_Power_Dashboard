@@ -565,7 +565,7 @@ async def poll_loop():
                     if pdu_ip not in pdu_ping_cache:
                         pdu_ping_cache[pdu_ip] = ping_ok(pdu_ip)
                     if not pdu_ping_cache[pdu_ip]:
-                        phases_all.append({"pdu_ip": pdu_ip, "pdu_key": pdu_key, "reachable": False, "total_w": None, "phases": [
+                        phases_all.append({"pdu_ip": pdu_ip, "pdu_key": pdu_key, "reachable": False, "total_w": None, "total_a": None, "phases": [
                             {"label": "Phase " + p, "current_a": 0, "power_w": 0, "reachable": False} for p in ("A", "B", "C")
                         ]})
                         continue
@@ -576,6 +576,7 @@ async def poll_loop():
 
                     phases = []
                     total_w: Optional[int] = None
+                    total_a: Optional[float] = None
                     if pdu_type == "servertech":
                         # PRO4X exposes per-phase current only — not per-phase voltage or watts.
                         # We deliberately do NOT derive per-phase watts (would be inaccurate on
@@ -589,6 +590,7 @@ async def poll_loop():
                         raw_total_w = snmp_get(pdu_ip, f"{OID_STECH_INLET_BASE}.5")
                         total_w_raw = _parse_int(raw_total_w) if raw_total_w else None
                         total_w = total_w_raw if total_w_raw is not None else 0
+                        total_a = round(sum(p["current_a"] for p in phases), 2)
 
                     elif pdu_type == "raritan":
                         for phase_idx, phase_label in [(1, "A"), (2, "B"), (3, "C")]:
@@ -599,12 +601,13 @@ async def poll_loop():
                             amps = round(amps_raw / 1000, 2) if amps_raw is not None else 0.0
                             watts = watts_raw if watts_raw is not None else 0
                             phases.append({"label": "Phase " + phase_label, "current_a": amps, "power_w": watts, "reachable": True})
-                        # Hardware-measured per-phase watts → exact total
+                        # Hardware-measured per-phase values → exact totals
                         total_w = sum(p["power_w"] for p in phases)
+                        total_a = round(sum(p["current_a"] for p in phases), 2)
                     else:
                         phases = [{"label": "Phase " + p, "current_a": 0, "power_w": 0, "reachable": False} for p in ("A", "B", "C")]
 
-                    phases_all.append({"pdu_ip": pdu_ip, "pdu_key": pdu_key, "reachable": True, "type": pdu_type, "phases": phases, "total_w": total_w})
+                    phases_all.append({"pdu_ip": pdu_ip, "pdu_key": pdu_key, "reachable": True, "type": pdu_type, "phases": phases, "total_w": total_w, "total_a": total_a})
 
                 latest_pdu_phases[rid] = phases_all
 
@@ -1305,20 +1308,6 @@ def ui():
   .crt-metric-val.watts { color: #a78bfa; }
   .crt-metric-val.offline { color: rgba(255,255,255,0.3); font-size: 14px; }
   .crt-metric-val.unavailable { color: rgba(167,139,250,0.25); font-size: 14px; font-style: italic; }
-  .pdu-total-banner {
-    margin-top: 2px;
-    padding: 2px 10px;
-    text-align: center;
-    font-weight: 900;
-    text-transform: uppercase;
-    letter-spacing: 1px;
-    color: #a78bfa;
-    font-size: clamp(9px, 3.2cqi, 32px);
-    background: rgba(15,23,42,0.7);
-    border: 1px solid rgba(167,139,250,0.25);
-    border-radius: 3px;
-  }
-  .pdu-total-banner.offline { color: rgba(255,255,255,0.3); border-color: rgba(255,255,255,0.1); }
   .no-pdu-msg {
     flex: 1 1 0;
     display: flex;
@@ -1858,8 +1847,16 @@ def ui():
           pduBanner.textContent = pdu.pdu_ip ? ((pdu.type === "servertech" ? "Server Tech" : pdu.type === "raritan" ? "Raritan" : "PDU") + ": " + pdu.pdu_ip) : "\u00A0";
           serverArea.appendChild(pduBanner);
 
-          // 3 phase boxes
-          (pdu.phases || []).forEach(phase => {
+          // 3 phase boxes + total box (4 evenly-sized blocks)
+          const blocks = (pdu.phases || []).slice();
+          blocks.push({
+            label: "Total",
+            current_a: pdu.total_a,
+            power_w: pdu.total_w,
+            reachable: pdu.reachable !== false && pdu.total_a !== null && pdu.total_a !== undefined,
+            isTotal: true
+          });
+          blocks.forEach(phase => {
             let block = document.createElement("div");
             block.className = "crt-block";
 
@@ -1913,17 +1910,6 @@ def ui():
             block.appendChild(body);
             serverArea.appendChild(block);
           });
-
-          // Total watts banner — uniform across PDU types
-          let totalBanner = document.createElement("div");
-          totalBanner.className = "pdu-total-banner";
-          if (pdu.reachable && pdu.total_w !== null && pdu.total_w !== undefined) {
-            totalBanner.textContent = "TOTAL: " + Number(pdu.total_w).toFixed(0) + " W";
-          } else {
-            totalBanner.textContent = "TOTAL: -- W";
-            totalBanner.classList.add("offline");
-          }
-          serverArea.appendChild(totalBanner);
         });
       } else {
         let msg = document.createElement("div");
