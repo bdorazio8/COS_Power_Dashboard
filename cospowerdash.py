@@ -1784,8 +1784,9 @@ def ui():
         <button onclick="testIdrac()" style="white-space:nowrap;padding:10px 14px;font-size:13px;background:rgba(37,99,235,0.3);color:#93c5fd;border:1px solid rgba(37,99,235,0.3);border-radius:10px;cursor:pointer;font-weight:700">Test</button>
       </div>
       <div id="idracTestResult" style="font-size:13px;font-weight:700;min-height:0;margin-bottom:8px"></div>
+      <div style="font-size:12px;color:rgba(148,163,184,0.85);margin-bottom:6px">A successful Test connection is required before saving.</div>
       <div class="row" style="margin-top:12px">
-        <button class="primary" onclick="saveIdracDialog()">Save</button>
+        <button id="idracSaveBtn" class="primary disabled" onclick="saveIdracDialog()">Save</button>
         <button onclick="closeIdracDialog()">Cancel</button>
       </div>
     </div>
@@ -2360,6 +2361,10 @@ def ui():
     document.getElementById("omePass").addEventListener("focus", function() {
       if (this.dataset.unchanged === "true") { this.value = ""; this.dataset.unchanged = "false"; }
     });
+    // Any edit to iDRAC fields invalidates the prior Test result
+    ["idracUser", "idracPass", "idracTestIp"].forEach(id => {
+      document.getElementById(id).addEventListener("input", invalidateIdracTest);
+    });
 
     const pduIpEl = document.getElementById("pduIp");
     pduIpEl.addEventListener("input", () => {
@@ -2714,6 +2719,22 @@ def ui():
   function closeSettings() { document.getElementById("settingsModal").style.display = "none"; }
 
   // ---------------- iDRAC Configuration Dialog ----------------
+  function setIdracSaveEnabled(enabled) {
+    const btn = document.getElementById("idracSaveBtn");
+    if (!btn) return;
+    if (enabled) btn.classList.remove("disabled");
+    else btn.classList.add("disabled");
+  }
+
+  function invalidateIdracTest() {
+    setIdracSaveEnabled(false);
+    const result = document.getElementById("idracTestResult");
+    if (result && result.textContent && !result.textContent.startsWith("Re-test")) {
+      result.textContent = "Re-test required after change";
+      result.style.color = "#94a3b8";
+    }
+  }
+
   async function openIdracDialog() {
     // Fetch BEFORE showing the modal to avoid a race where the user
     // starts typing and the fetch response then overwrites their input.
@@ -2733,12 +2754,15 @@ def ui():
     passEl.dataset.unchanged = hasPassword ? "true" : "false";
     document.getElementById("idracTestIp").value = "";
     document.getElementById("idracTestResult").textContent = "";
+    setIdracSaveEnabled(false);
     document.getElementById("idracModal").style.display = "flex";
   }
 
   function closeIdracDialog() { document.getElementById("idracModal").style.display = "none"; }
 
   async function saveIdracDialog() {
+    // Save is gated on a successful Test connection — refuse if not verified.
+    if (document.getElementById("idracSaveBtn").classList.contains("disabled")) return;
     const idracUser = document.getElementById("idracUser").value.trim();
     const idracPassEl = document.getElementById("idracPass");
     const idracPass = idracPassEl.value.trim();
@@ -2825,6 +2849,7 @@ def ui():
   }
 
   async function testIdrac() {
+    setIdracSaveEnabled(false);
     const ip = document.getElementById("idracTestIp").value.trim();
     const user = document.getElementById("idracUser").value.trim();
     const passEl = document.getElementById("idracPass");
@@ -2845,8 +2870,14 @@ def ui():
         body: JSON.stringify(body)
       });
       const data = await res.json();
-      if (data.ok) { result.textContent = "Connected — " + (data.model || "OK"); result.style.color = "#22c55e"; }
-      else { result.textContent = data.error || "Connection failed"; result.style.color = "#f87171"; }
+      if (data.ok) {
+        result.textContent = "Connected — " + (data.model || "OK");
+        result.style.color = "#22c55e";
+        setIdracSaveEnabled(true);
+      } else {
+        result.textContent = data.error || "Connection failed";
+        result.style.color = "#f87171";
+      }
     } catch(e) { result.textContent = "Test failed"; result.style.color = "#f87171"; }
   }
 
