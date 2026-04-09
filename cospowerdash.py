@@ -1370,7 +1370,7 @@ def ui():
     text-align: center;
     min-width: 3.4em;
   }
-  .pdu-load-section.split .pdu-load-row-label { font-size: clamp(11px, 3.6cqi, 30px); min-width: 2.4em; }
+  .pdu-load-section.split .pdu-load-row-label { font-size: clamp(11px, 3.6cqi, 30px); min-width: 1.8em; }
   .pdu-load-track {
     flex: 1 1 0;
     min-width: 0;
