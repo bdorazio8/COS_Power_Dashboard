@@ -1646,20 +1646,22 @@ def ui():
 
   #reportsTable th {
     background: #1e293b;
-    color: #94a3b8;
-    font-weight: 700;
-    font-size: 11px;
+    color: #cbd5e1;
+    font-weight: 800;
+    font-size: 13px;
     text-transform: uppercase;
     letter-spacing: 0.5px;
-    padding: 8px 6px;
+    padding: 10px 8px;
     text-align: left;
-    border-bottom: 1px solid rgba(255,255,255,0.1);
+    border-bottom: 1px solid rgba(255,255,255,0.12);
     white-space: nowrap;
   }
   #reportsTable td {
-    padding: 6px;
-    border-bottom: 1px solid rgba(255,255,255,0.04);
+    padding: 8px;
+    border-bottom: 1px solid rgba(255,255,255,0.06);
     white-space: nowrap;
+    font-weight: 600;
+    color: #e2e8f0;
   }
   #reportsTable tr:hover td {
     background: rgba(255,255,255,0.03);
@@ -1890,7 +1892,7 @@ def ui():
       </div>
       <div id="reportsLoading" style="display:none;padding:20px 0;text-align:center;opacity:0.6;font-weight:700">Loading...</div>
       <div id="reportsResults" style="display:none;flex:1;min-height:0;overflow:auto;margin-top:10px">
-        <table id="reportsTable" style="width:100%;border-collapse:collapse;font-size:12px">
+        <table id="reportsTable" style="width:100%;border-collapse:collapse;font-size:14px">
           <thead id="reportsHead" style="position:sticky;top:0"></thead>
           <tbody id="reportsBody"></tbody>
         </table>
@@ -3053,13 +3055,18 @@ def ui():
       });
       body.appendChild(tr);
     });
-    document.getElementById("reportsContent").style.width = "min(900px, 95vw)";
+    // Size the modal to fit the table without horizontal scrolling. Use
+    // most of the viewport so wide reports fit; the body still scrolls
+    // vertically if there are too many rows.
+    document.getElementById("reportsContent").style.width = "min(1800px, 98vw)";
+    document.getElementById("reportsContent").style.maxWidth = "98vw";
     document.getElementById("reportsResults").style.display = "block";
     document.getElementById("reportsActions").style.display = "block";
   }
 
   function backToReportSelect() {
     document.getElementById("reportsContent").style.width = "";
+    document.getElementById("reportsContent").style.maxWidth = "";
     document.getElementById("reportsResults").style.display = "none";
     document.getElementById("reportsActions").style.display = "none";
     document.getElementById("reportsSelector").style.display = "block";
