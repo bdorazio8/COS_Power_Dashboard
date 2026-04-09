@@ -1333,18 +1333,22 @@ def ui():
     overflow: hidden;
   }
   .pdu-load-section {
-    flex: 0.75 1 0;
+    flex: 0.45 1 0;
     min-height: 0;
     margin-top: 4px;
-    padding: 5px 7px;
+    padding: 4px 7px;
     border-top: 2px solid rgba(167,139,250,0.55);
     background: rgba(15,23,42,0.35);
     display: flex;
     flex-direction: column;
+    justify-content: center;
     gap: 4px;
     overflow: hidden;
   }
-  .pdu-load-section.split { gap: 3px; }
+  .pdu-load-section.split {
+    flex: 1.1 1 0;
+    gap: 3px;
+  }
   .pdu-load-row {
     flex: 1 1 0;
     min-height: 0;
@@ -1367,7 +1371,9 @@ def ui():
   .pdu-load-track {
     flex: 1 1 0;
     min-width: 0;
-    height: 100%;
+    /* Fixed thickness driven by rack WIDTH only, so bars look identical
+       on 1-PDU and 2-PDU racks regardless of how tall the section is. */
+    height: clamp(9px, 2.6cqi, 22px);
     display: flex;
     gap: 0;
   }
