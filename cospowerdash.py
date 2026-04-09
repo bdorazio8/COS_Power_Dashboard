@@ -1666,6 +1666,69 @@ def ui():
   #reportsTable tr:hover td {
     background: rgba(255,255,255,0.03);
   }
+
+  /* Human-readable report view */
+  .human-report {
+    padding: 8px 4px;
+    color: #e2e8f0;
+    line-height: 1.55;
+  }
+  .human-server {
+    margin-bottom: 18px;
+    padding: 12px 14px;
+    background: rgba(15,23,42,0.55);
+    border-left: 3px solid #2563eb;
+    border-radius: 4px;
+  }
+  .human-server-model {
+    font-size: 18px;
+    font-weight: 800;
+    color: #f8fafc;
+    letter-spacing: 0.2px;
+  }
+  .human-server-meta {
+    font-size: 13px;
+    color: #94a3b8;
+    margin-top: 2px;
+  }
+  .human-server-summary {
+    margin-top: 10px;
+    padding: 6px 0;
+    font-size: 14px;
+    font-weight: 700;
+    color: #cbd5e1;
+    border-bottom: 1px solid rgba(255,255,255,0.08);
+  }
+  .human-server-summary.attention { color: #f87171; }
+  .human-server-summary.healthy   { color: #4ade80; }
+  .human-gpu-list {
+    list-style: none;
+    margin: 8px 0 0 0;
+    padding: 0;
+  }
+  .human-gpu-list li {
+    padding: 4px 0 4px 18px;
+    font-size: 13px;
+    color: #cbd5e1;
+    position: relative;
+  }
+  .human-gpu-list li::before {
+    content: "•";
+    position: absolute;
+    left: 4px;
+    color: #64748b;
+    font-weight: 900;
+  }
+  .human-gpu-list li.abnormal {
+    color: #f87171;
+  }
+  .human-gpu-list li.abnormal::before { color: #f87171; }
+  .human-empty {
+    padding: 24px;
+    text-align: center;
+    color: #94a3b8;
+    font-weight: 700;
+  }
 </style>
 </head>
 <body>
@@ -1892,15 +1955,19 @@ def ui():
       </div>
       <div id="reportsLoading" style="display:none;padding:20px 0;text-align:center;opacity:0.6;font-weight:700">Loading...</div>
       <div id="reportsResults" style="display:none;flex:1;min-height:0;overflow:auto;margin-top:10px">
-        <table id="reportsTable" style="width:100%;border-collapse:collapse;font-size:14px">
-          <thead id="reportsHead" style="position:sticky;top:0"></thead>
-          <tbody id="reportsBody"></tbody>
-        </table>
+        <div id="reportsHumanView" style="display:none"></div>
+        <div id="reportsTableWrapper" style="display:none">
+          <table id="reportsTable" style="width:100%;border-collapse:collapse;font-size:14px">
+            <thead id="reportsHead" style="position:sticky;top:0"></thead>
+            <tbody id="reportsBody"></tbody>
+          </table>
+        </div>
       </div>
       <div id="reportsActions" style="display:none;margin-top:10px">
         <div class="row">
           <button onclick="backToReportSelect()">Back</button>
-          <button onclick="downloadReportCsv()">Download CSV</button>
+          <button id="reportsToggleViewBtn" onclick="toggleReportView()" style="display:none">View Source</button>
+          <button id="reportsDownloadBtn" onclick="downloadReportCurrent()">Download CSV</button>
           <button onclick="closeReports()">Close</button>
         </div>
       </div>
@@ -3063,6 +3130,271 @@ def ui():
     document.getElementById("reportsContent").style.maxWidth = "98vw";
     document.getElementById("reportsResults").style.display = "block";
     document.getElementById("reportsActions").style.display = "block";
+
+    // Build a human-readable view if a recipe exists for this report
+    const humanContainer = document.getElementById("reportsHumanView");
+    humanContainer.innerHTML = "";
+    const humanContent = buildHumanReport(columns, rows);
+    const toggleBtn = document.getElementById("reportsToggleViewBtn");
+    if (humanContent) {
+      humanContainer.appendChild(humanContent);
+      toggleBtn.style.display = "";
+      setReportView("human");
+    } else {
+      // No recipe — just show the source table
+      toggleBtn.style.display = "none";
+      setReportView("source");
+    }
+  }
+
+  // ---------------- Human-readable report views ----------------
+  // Per-report recipes that turn the spreadsheet into a structured
+  // document. To add support for a new report, write a builder
+  // function and add it to the dispatch in buildHumanReport().
+
+  function buildHumanReport(columns, rows) {
+    // GPU Details report — detected by GPU-specific column names
+    if (columns.indexOf("GPU Name") >= 0 && columns.indexOf("GPU FQDD") >= 0) {
+      return buildGpuDetailsHumanReport(columns, rows);
+    }
+    return null;
+  }
+
+  function colIndexMap(columns, names) {
+    const map = {};
+    names.forEach(function(n) { map[n] = columns.indexOf(n); });
+    return map;
+  }
+
+  function extractSlotNumber(fqdd) {
+    // fqdd looks like "Video.Slot.21-1" — pull the digits after "Slot."
+    if (!fqdd) return "";
+    var key = "Slot.";
+    var i = fqdd.indexOf(key);
+    if (i < 0) return "";
+    var after = fqdd.substring(i + key.length);
+    var n = "";
+    for (var j = 0; j < after.length; j++) {
+      var c = after.charCodeAt(j);
+      if (c >= 48 && c <= 57) n += after.charAt(j);
+      else break;
+    }
+    return n;
+  }
+
+  function isHealthyState(name, value) {
+    if (!value) return true;
+    var v = value.toLowerCase().trim();
+    if (name === "GPU Health")              return v === "online" || v === "ok";
+    if (name === "GPU Status")              return v === "available" || v === "enabled";
+    if (name === "GPU Power Supply Status") return v === "enabled";
+    if (name === "GPU Thermal Alert State") return v === "not pending" || v === "off" || v === "released";
+    if (name === "GPU Power Brake State")   return v === "released" || v === "off" || v === "not pending";
+    return true;
+  }
+
+  function buildGpuDetailsHumanReport(columns, rows) {
+    var COLS = colIndexMap(columns, [
+      "Server Name", "Server Model", "Server Identifier",
+      "GPU Name", "GPU FQDD", "GPU Firmware Version", "GPU Health",
+      "GPU Status", "GPU Manufacturer", "GPU Marketing Name",
+      "GPU Serial Number", "GPU Power Supply Status",
+      "GPU Thermal Alert State", "GPU Power Brake State"
+    ]);
+    function cell(row, name) {
+      var i = COLS[name];
+      return (i >= 0 && i < row.length && row[i] != null) ? String(row[i]).trim() : "";
+    }
+
+    // Group rows by Server Name (iDRAC IP)
+    var grouped = new Map();
+    rows.forEach(function(row) {
+      var ip = cell(row, "Server Name");
+      if (!ip) return;
+      if (!grouped.has(ip)) grouped.set(ip, []);
+      grouped.get(ip).push(row);
+    });
+
+    var container = document.createElement("div");
+    container.className = "human-report";
+
+    if (grouped.size === 0) {
+      var empty = document.createElement("div");
+      empty.className = "human-empty";
+      empty.textContent = "No GPU data for any configured server.";
+      container.appendChild(empty);
+      return container;
+    }
+
+    // Sort servers by IP for stable display
+    var ips = Array.from(grouped.keys()).sort();
+    ips.forEach(function(ip) {
+      var serverRows = grouped.get(ip);
+      var first = serverRows[0];
+      var model = cell(first, "Server Model") || "Unknown Model";
+      var tag = cell(first, "Server Identifier") || "—";
+
+      var serverDiv = document.createElement("div");
+      serverDiv.className = "human-server";
+
+      var modelLine = document.createElement("div");
+      modelLine.className = "human-server-model";
+      modelLine.textContent = model;
+      serverDiv.appendChild(modelLine);
+
+      var metaLine = document.createElement("div");
+      metaLine.className = "human-server-meta";
+      metaLine.textContent = "Service Tag: " + tag + "    \u00B7    iDRAC: " + ip;
+      serverDiv.appendChild(metaLine);
+
+      // Aggregate summary
+      var firmwares = new Set();
+      var marketingNames = new Set();
+      var allHealthy = true;
+      serverRows.forEach(function(r) {
+        firmwares.add(cell(r, "GPU Firmware Version"));
+        marketingNames.add(cell(r, "GPU Marketing Name"));
+        if (!isHealthyState("GPU Health", cell(r, "GPU Health"))) allHealthy = false;
+        if (!isHealthyState("GPU Status", cell(r, "GPU Status"))) allHealthy = false;
+        if (!isHealthyState("GPU Thermal Alert State", cell(r, "GPU Thermal Alert State"))) allHealthy = false;
+        if (!isHealthyState("GPU Power Brake State", cell(r, "GPU Power Brake State"))) allHealthy = false;
+        if (!isHealthyState("GPU Power Supply Status", cell(r, "GPU Power Supply Status"))) allHealthy = false;
+      });
+
+      var summary = document.createElement("div");
+      summary.className = "human-server-summary " + (allHealthy ? "healthy" : "attention");
+      var marketing = Array.from(marketingNames).filter(function(s){ return s; }).join(", ") || "GPU";
+      var summaryParts = [serverRows.length + " \u00D7 " + marketing];
+      if (firmwares.size === 1) {
+        var fwOnly = Array.from(firmwares)[0];
+        if (fwOnly) summaryParts.push("Firmware " + fwOnly);
+      } else if (firmwares.size > 1) {
+        summaryParts.push("Mixed firmware (" + firmwares.size + " versions)");
+      }
+      summaryParts.push(allHealthy ? "All Healthy" : "ATTENTION REQUIRED");
+      summary.textContent = summaryParts.join("    \u00B7    ");
+      serverDiv.appendChild(summary);
+
+      // Per-GPU bullet list, sorted by slot number
+      var sortedRows = serverRows.slice().sort(function(a, b) {
+        var sa = parseInt(extractSlotNumber(cell(a, "GPU FQDD")), 10) || 0;
+        var sb = parseInt(extractSlotNumber(cell(b, "GPU FQDD")), 10) || 0;
+        return sa - sb;
+      });
+      var ul = document.createElement("ul");
+      ul.className = "human-gpu-list";
+      sortedRows.forEach(function(r) {
+        var slot = extractSlotNumber(cell(r, "GPU FQDD"));
+        var slotLabel = slot ? ("Slot " + slot) : (cell(r, "GPU FQDD") || "GPU");
+        var serial = cell(r, "GPU Serial Number") || "—";
+        var li = document.createElement("li");
+
+        // Check for any abnormal states and surface them
+        var problems = [];
+        var checks = [
+          ["GPU Health", "Health"],
+          ["GPU Status", "Status"],
+          ["GPU Power Supply Status", "Power Supply"],
+          ["GPU Thermal Alert State", "Thermal Alert"],
+          ["GPU Power Brake State", "Power Brake"]
+        ];
+        checks.forEach(function(pair) {
+          var v = cell(r, pair[0]);
+          if (v && !isHealthyState(pair[0], v)) {
+            problems.push(pair[1] + ": " + v);
+          }
+        });
+
+        var line = slotLabel + "    \u00B7    Serial " + serial;
+        if (problems.length > 0) {
+          line += "    \u00B7    " + problems.join("    \u00B7    ");
+          li.classList.add("abnormal");
+        } else {
+          line += "    \u00B7    OK";
+        }
+        li.textContent = line;
+        ul.appendChild(li);
+      });
+      serverDiv.appendChild(ul);
+
+      container.appendChild(serverDiv);
+    });
+
+    return container;
+  }
+
+  // ---------------- View toggling ----------------
+  var currentReportView = "human";
+
+  function setReportView(view) {
+    currentReportView = view;
+    var human = document.getElementById("reportsHumanView");
+    var tableWrap = document.getElementById("reportsTableWrapper");
+    var toggleBtn = document.getElementById("reportsToggleViewBtn");
+    var dlBtn = document.getElementById("reportsDownloadBtn");
+    if (view === "human") {
+      human.style.display = "";
+      tableWrap.style.display = "none";
+      toggleBtn.textContent = "View Source";
+      dlBtn.textContent = "Download PDF";
+    } else {
+      human.style.display = "none";
+      tableWrap.style.display = "";
+      toggleBtn.textContent = "View Summary";
+      dlBtn.textContent = "Download CSV";
+    }
+  }
+
+  function toggleReportView() {
+    setReportView(currentReportView === "human" ? "source" : "human");
+  }
+
+  function downloadReportCurrent() {
+    if (currentReportView === "human") downloadReportPdf();
+    else downloadReportCsv();
+  }
+
+  function downloadReportPdf() {
+    var human = document.getElementById("reportsHumanView");
+    if (!human || !human.innerHTML.trim()) return;
+    var sel = document.getElementById("reportSelect");
+    var name = "Report";
+    if (sel && sel.selectedIndex >= 0 && sel.options[sel.selectedIndex]) {
+      name = sel.options[sel.selectedIndex].textContent || "Report";
+    }
+    var w = window.open("", "_blank");
+    if (!w) {
+      alert("Pop-up blocked. Allow pop-ups for this site to download the PDF.");
+      return;
+    }
+    // Build print-friendly HTML in-memory using DOM, then serialize.
+    // This avoids any escape-sequence pitfalls in source code.
+    var doc = w.document;
+    doc.open();
+    var head = "<!DOCTYPE html><html><head><meta charset='utf-8'><title>" + name + "</title>";
+    var css = "body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;color:#0f172a;background:#fff;padding:24px;}"
+      + "h1{font-size:22px;margin:0 0 16px 0;}"
+      + ".human-server{margin-bottom:18px;padding:12px 14px;background:#f8fafc;border-left:3px solid #1e40af;border-radius:4px;page-break-inside:avoid;}"
+      + ".human-server-model{font-size:17px;font-weight:800;color:#0f172a;}"
+      + ".human-server-meta{font-size:12px;color:#475569;margin-top:2px;}"
+      + ".human-server-summary{margin-top:8px;padding:6px 0;font-size:13px;font-weight:700;color:#1e293b;border-bottom:1px solid #e2e8f0;}"
+      + ".human-server-summary.attention{color:#b91c1c;}"
+      + ".human-server-summary.healthy{color:#166534;}"
+      + ".human-gpu-list{list-style:none;margin:8px 0 0 0;padding:0;}"
+      + ".human-gpu-list li{padding:3px 0 3px 16px;font-size:12px;color:#1e293b;position:relative;}"
+      + ".human-gpu-list li::before{content:'\u2022';position:absolute;left:2px;color:#64748b;}"
+      + ".human-gpu-list li.abnormal{color:#b91c1c;}"
+      + ".human-gpu-list li.abnormal::before{color:#b91c1c;}"
+      + "@media print{body{padding:12px;} .human-server{box-shadow:none;}}";
+    head += "<style>" + css + "</style></head><body>";
+    head += "<h1>" + name + "</h1>";
+    doc.write(head);
+    doc.write(human.innerHTML);
+    doc.write("</body></html>");
+    doc.close();
+    setTimeout(function() {
+      try { w.focus(); w.print(); } catch (e) {}
+    }, 300);
   }
 
   function backToReportSelect() {
@@ -3071,6 +3403,9 @@ def ui():
     document.getElementById("reportsResults").style.display = "none";
     document.getElementById("reportsActions").style.display = "none";
     document.getElementById("reportsSelector").style.display = "block";
+    document.getElementById("reportsHumanView").innerHTML = "";
+    document.getElementById("reportsTableWrapper").style.display = "none";
+    document.getElementById("reportsHumanView").style.display = "none";
   }
 
   // CSV download for the currently rendered report. Reads the live
