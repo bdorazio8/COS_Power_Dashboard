@@ -2033,6 +2033,12 @@ def ui():
     padding: 18px;
     z-index: 9999;
   }
+  /* When a modal is stacked on top of another visible modal, suppress its
+     backdrop so the dimming doesn't compound. The bottom-most visible
+     modal still provides the single shared backdrop covering the page. */
+  .modal.stacked {
+    background: transparent;
+  }
   .modal-content {
     background:#1e293b;
     padding:24px;
@@ -3104,6 +3110,23 @@ def ui():
     // viewportStyle and pduLoadStyle were already initialized synchronously
     // from localStorage at script start so the first paint is correct.
     computeRackSize(racksCache.length);
+
+    // Single-backdrop dimming for stacked modals: when more than one modal
+    // is visible, only the first (DOM-order) keeps its backdrop; the rest
+    // get .stacked which makes their background transparent so the dimming
+    // doesn't compound. We watch every .modal's style attribute so we don't
+    // need to touch every show/hide call site.
+    (function setupModalStacking() {
+      const modals = document.querySelectorAll(".modal");
+      function update() {
+        const visible = Array.from(modals).filter(m => m.style.display === "flex");
+        modals.forEach(m => m.classList.remove("stacked"));
+        visible.slice(1).forEach(m => m.classList.add("stacked"));
+      }
+      const obs = new MutationObserver(update);
+      modals.forEach(m => obs.observe(m, { attributes: true, attributeFilter: ["style"] }));
+      update();
+    })();
 
     document.getElementById("idracPass").addEventListener("focus", function() {
       if (this.dataset.unchanged === "true") { this.value = ""; this.dataset.unchanged = "false"; }
