@@ -1759,33 +1759,55 @@ def ui():
         <label style="cursor:pointer;white-space:nowrap"><input type="radio" name="pduLoadStyle" value="grouped" id="loadGrouped" checked /> Grouped</label>
         <label style="cursor:pointer;white-space:nowrap"><input type="radio" name="pduLoadStyle" value="inline" id="loadInline" /> Individual</label>
       </div>
-      <div style="margin-top:16px;border-top:1px solid rgba(255,255,255,0.08);padding-top:12px">
-        <div style="margin-bottom:4px"><span style="color:#cbd5e1;font-weight:600">iDRAC Credentials:</span></div>
-        <div style="display:flex;gap:8px;margin-bottom:8px">
-          <input id="idracUser" placeholder="Username" style="flex:1;margin-bottom:0" />
-          <input id="idracPass" type="password" placeholder="Password" style="flex:1;margin-bottom:0" />
-        </div>
-        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
-          <input id="idracTestIp" placeholder="Test IP (any iDRAC)" style="margin-bottom:0;flex:1" />
-          <button onclick="testIdrac()" style="white-space:nowrap;padding:10px 14px;font-size:13px;background:rgba(37,99,235,0.3);color:#93c5fd;border:1px solid rgba(37,99,235,0.3);border-radius:10px;cursor:pointer;font-weight:700">Test</button>
-        </div>
-        <div id="idracTestResult" style="font-size:13px;font-weight:700;min-height:0"></div>
-      </div>
-      <div style="margin-top:16px;border-top:1px solid rgba(255,255,255,0.08);padding-top:12px">
-        <div style="margin-bottom:4px"><span style="color:#cbd5e1;font-weight:600">OME Connection:</span></div>
-        <input id="omeHost" placeholder="OME Host (IP or hostname)" style="margin-bottom:8px" />
-        <div style="display:flex;gap:8px;margin-bottom:8px">
-          <input id="omeUser" placeholder="Username" style="flex:1;margin-bottom:0" />
-          <input id="omePass" type="password" placeholder="Password" style="flex:1;margin-bottom:0" />
-        </div>
-        <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
-          <button onclick="testOme()" style="white-space:nowrap;padding:10px 14px;font-size:13px;background:rgba(37,99,235,0.3);color:#93c5fd;border:1px solid rgba(37,99,235,0.3);border-radius:10px;cursor:pointer;font-weight:700">Test Connection</button>
-          <span id="omeTestResult" style="font-size:13px;font-weight:700"></span>
-        </div>
+      <div style="margin-top:16px;border-top:1px solid rgba(255,255,255,0.08);padding-top:12px;display:flex;gap:8px">
+        <button onclick="openIdracDialog()" style="flex:1;padding:10px 14px;font-size:13px;background:rgba(37,99,235,0.3);color:#93c5fd;border:1px solid rgba(37,99,235,0.3);border-radius:10px;cursor:pointer;font-weight:700">Configure iDRAC</button>
+        <button onclick="openOmeDialog()" style="flex:1;padding:10px 14px;font-size:13px;background:rgba(37,99,235,0.3);color:#93c5fd;border:1px solid rgba(37,99,235,0.3);border-radius:10px;cursor:pointer;font-weight:700">Configure OME</button>
       </div>
       <div class="row" style="margin-top:12px">
         <button class="primary" onclick="saveSettings()">Save</button>
         <button onclick="closeSettings()">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- iDRAC Configuration Modal -->
+  <div class="modal" id="idracModal">
+    <div class="modal-content">
+      <h3>Configure iDRAC</h3>
+      <div style="margin-bottom:4px"><span style="color:#cbd5e1;font-weight:600">iDRAC Credentials:</span></div>
+      <div style="display:flex;gap:8px;margin-bottom:8px">
+        <input id="idracUser" placeholder="Username" style="flex:1;margin-bottom:0" />
+        <input id="idracPass" type="password" placeholder="Password" style="flex:1;margin-bottom:0" />
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+        <input id="idracTestIp" placeholder="Test IP (any iDRAC)" style="margin-bottom:0;flex:1" />
+        <button onclick="testIdrac()" style="white-space:nowrap;padding:10px 14px;font-size:13px;background:rgba(37,99,235,0.3);color:#93c5fd;border:1px solid rgba(37,99,235,0.3);border-radius:10px;cursor:pointer;font-weight:700">Test</button>
+      </div>
+      <div id="idracTestResult" style="font-size:13px;font-weight:700;min-height:0;margin-bottom:8px"></div>
+      <div class="row" style="margin-top:12px">
+        <button class="primary" onclick="saveIdracDialog()">Save</button>
+        <button onclick="closeIdracDialog()">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- OME Configuration Modal -->
+  <div class="modal" id="omeModal">
+    <div class="modal-content">
+      <h3>Configure OME</h3>
+      <div style="margin-bottom:4px"><span style="color:#cbd5e1;font-weight:600">OME Connection:</span></div>
+      <input id="omeHost" placeholder="OME Host (IP or hostname)" style="margin-bottom:8px" />
+      <div style="display:flex;gap:8px;margin-bottom:8px">
+        <input id="omeUser" placeholder="Username" style="flex:1;margin-bottom:0" />
+        <input id="omePass" type="password" placeholder="Password" style="flex:1;margin-bottom:0" />
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+        <button onclick="testOme()" style="white-space:nowrap;padding:10px 14px;font-size:13px;background:rgba(37,99,235,0.3);color:#93c5fd;border:1px solid rgba(37,99,235,0.3);border-radius:10px;cursor:pointer;font-weight:700">Test Connection</button>
+        <span id="omeTestResult" style="font-size:13px;font-weight:700"></span>
+      </div>
+      <div class="row" style="margin-top:12px">
+        <button class="primary" onclick="saveOmeDialog()">Save</button>
+        <button onclick="closeOmeDialog()">Cancel</button>
       </div>
     </div>
   </div>
@@ -2680,40 +2702,92 @@ def ui():
   }
 
   // ---------------- Settings ----------------
-  async function openSettings() {
+  function openSettings() {
     document.getElementById("settingsModal").style.display = "flex";
     const current = document.getElementById("dashTitle").innerText || "";
     document.getElementById("titleInput").value = current.trim();
     document.getElementById(viewportStyle === "fill" ? "vpFill" : "vpRacks").checked = true;
     document.getElementById(pduLoadStyle === "inline" ? "loadInline" : "loadGrouped").checked = true;
+    setTimeout(() => document.getElementById("titleInput").focus(), 50);
+  }
+
+  function closeSettings() { document.getElementById("settingsModal").style.display = "none"; }
+
+  // ---------------- iDRAC Configuration Dialog ----------------
+  async function openIdracDialog() {
+    document.getElementById("idracModal").style.display = "flex";
     document.getElementById("idracTestResult").textContent = "";
     document.getElementById("idracTestIp").value = "";
+    document.getElementById("idracUser").value = "";
+    const passEl = document.getElementById("idracPass");
+    passEl.value = "";
+    passEl.dataset.unchanged = "false";
     try {
       const ir = await fetch("/api/settings/idrac");
       const id = await ir.json();
       if (id && id.ok) {
         document.getElementById("idracUser").value = id.username || "";
-        const passEl = document.getElementById("idracPass");
         passEl.value = id.has_password ? "********" : "";
         passEl.dataset.unchanged = id.has_password ? "true" : "false";
       }
     } catch(e) {}
+  }
+
+  function closeIdracDialog() { document.getElementById("idracModal").style.display = "none"; }
+
+  async function saveIdracDialog() {
+    const idracUser = document.getElementById("idracUser").value.trim();
+    const idracPassEl = document.getElementById("idracPass");
+    const idracPass = idracPassEl.value.trim();
+    if (idracUser && idracPass && idracPassEl.dataset.unchanged !== "true") {
+      try {
+        await fetch("/api/settings/idrac", {
+          method:"POST", headers:{"Content-Type":"application/json"},
+          body: JSON.stringify({username: idracUser, password: idracPass})
+        });
+      } catch(e) {}
+    }
+    closeIdracDialog();
+  }
+
+  // ---------------- OME Configuration Dialog ----------------
+  async function openOmeDialog() {
+    document.getElementById("omeModal").style.display = "flex";
     document.getElementById("omeTestResult").textContent = "";
+    document.getElementById("omeHost").value = "";
+    document.getElementById("omeUser").value = "";
+    const omePassEl = document.getElementById("omePass");
+    omePassEl.value = "";
+    omePassEl.dataset.unchanged = "false";
     try {
       const or = await fetch("/api/settings/ome");
       const od = await or.json();
       if (od && od.ok) {
         document.getElementById("omeHost").value = od.host || "";
         document.getElementById("omeUser").value = od.username || "";
-        const omePassEl = document.getElementById("omePass");
         omePassEl.value = od.has_password ? "********" : "";
         omePassEl.dataset.unchanged = od.has_password ? "true" : "false";
       }
     } catch(e) {}
-    setTimeout(() => document.getElementById("titleInput").focus(), 50);
   }
 
-  function closeSettings() { document.getElementById("settingsModal").style.display = "none"; }
+  function closeOmeDialog() { document.getElementById("omeModal").style.display = "none"; }
+
+  async function saveOmeDialog() {
+    const omeHost = document.getElementById("omeHost").value.trim();
+    const omeUser = document.getElementById("omeUser").value.trim();
+    const omePassEl = document.getElementById("omePass");
+    const omePass = omePassEl.value.trim();
+    if (omeHost && omeUser && omePass && omePassEl.dataset.unchanged !== "true") {
+      try {
+        await fetch("/api/settings/ome", {
+          method:"POST", headers:{"Content-Type":"application/json"},
+          body: JSON.stringify({host: omeHost, username: omeUser, password: omePass})
+        });
+      } catch(e) {}
+    }
+    closeOmeDialog();
+  }
 
   function applyTitle(title) {
     const t = (title || "").trim();
@@ -2740,31 +2814,6 @@ def ui():
       const titleData = await titleRes.json();
       if (titleData && titleData.ok && titleData.title) applyTitle(titleData.title);
     } catch(e) {}
-    // Save iDRAC credentials if changed
-    const idracUser = document.getElementById("idracUser").value.trim();
-    const idracPassEl = document.getElementById("idracPass");
-    const idracPass = idracPassEl.value.trim();
-    if (idracUser && idracPass && idracPassEl.dataset.unchanged !== "true") {
-      try {
-        await fetch("/api/settings/idrac", {
-          method:"POST", headers:{"Content-Type":"application/json"},
-          body: JSON.stringify({username: idracUser, password: idracPass})
-        });
-      } catch(e) {}
-    }
-    // Save OME credentials if changed
-    const omeHost = document.getElementById("omeHost").value.trim();
-    const omeUser = document.getElementById("omeUser").value.trim();
-    const omePassEl = document.getElementById("omePass");
-    const omePass = omePassEl.value.trim();
-    if (omeHost && omeUser && omePass && omePassEl.dataset.unchanged !== "true") {
-      try {
-        await fetch("/api/settings/ome", {
-          method:"POST", headers:{"Content-Type":"application/json"},
-          body: JSON.stringify({host: omeHost, username: omeUser, password: omePass})
-        });
-      } catch(e) {}
-    }
     closeSettings();
   }
 
