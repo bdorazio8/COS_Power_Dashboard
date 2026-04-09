@@ -459,37 +459,69 @@ def _parse_float(text: str) -> Optional[float]:
 
 _pdu_rated_a_cache: Dict[str, float] = {}
 
-# Inlet sensor configuration table (PDU2-MIB) — used to discover the PDU's
-# own configured upperCritical threshold for rmsCurrent. The exact column
-# number for upperCritical varies between MIB versions, so we try several
-# plausible columns and accept the first one that returns a sane value.
-# Format: 1.3.6.1.4.1.13742.6.3.3.4.1.{column}.1.1.1
-#   column = upperCritical column candidate
-#   .1.1.1 = role(inlet=1).inletId(1).sensorType(rmsCurrent=1)
-_RATED_AMPS_OID_CANDIDATES = [
+# Configured upperCritical threshold for inlet rmsCurrent, in milliamps.
+# Column 31 of the PDU2-MIB inletSensorConfigurationTable. This is the
+# preferred source — it's the alarm threshold the device itself uses.
+# Format: 1.3.6.1.4.1.13742.6.3.3.4.1.{col}.1(role=inlet).1(inletId).1(sensorType=rmsCurrent)
+_RATED_AMPS_THRESHOLD_OIDS = [
     "1.3.6.1.4.1.13742.6.3.3.4.1.31.1.1.1",
     "1.3.6.1.4.1.13742.6.3.3.4.1.6.1.1.1",
     "1.3.6.1.4.1.13742.6.3.3.4.1.5.1.1.1",
 ]
+
+# Inlet nameplate rated current, exposed as a STRING like "80A" by the
+# inletConfigurationTable. Used as a fallback when no alarm threshold has
+# been configured on the PDU (typical for unconfigured Raritan PX3s).
+_RATED_AMPS_NAMEPLATE_OID = "1.3.6.1.4.1.13742.6.3.3.3.1.7.1.1"
+
 RATED_AMPS_DEFAULT = 30.0  # Hardcoded fallback when auto-detection fails
 
-def get_pdu_rated_amps(ip: str) -> float:
-    """Discover the PDU's rated/upperCritical inlet current in amps.
+def _parse_amps_string(raw: Optional[str]) -> Optional[float]:
+    """Parse an SNMP STRING return like 'STRING: "80A"' into a float in amps."""
+    if not raw or "STRING:" not in raw:
+        return None
+    s = raw.split("STRING:", 1)[1].strip().strip('"').strip()
+    s = s.rstrip("Aa").strip()
+    if not s:
+        return None
+    try:
+        return float(s)
+    except ValueError:
+        return None
 
-    Tries candidate OIDs from the PDU2-MIB inlet sensor configuration table,
-    accepts the first plausible result (5–100 A), and caches it. Falls back
-    to RATED_AMPS_DEFAULT if nothing usable is found.
+def get_pdu_rated_amps(ip: str) -> float:
+    """Discover the PDU's per-phase rated inlet current in amps.
+
+    Order of precedence:
+      1. Configured upperCritical threshold from the inlet sensor config table.
+         This reflects the user-set alarm threshold and is the most accurate
+         "100% load" reference when commissioned correctly.
+      2. Nameplate inletRatedCurrent string from the inlet config table
+         (e.g. "80A"). Used when the PDU has no thresholds configured.
+      3. RATED_AMPS_DEFAULT hardcoded fallback.
+    Result is cached per IP for the process lifetime.
     """
     if ip in _pdu_rated_a_cache:
         return _pdu_rated_a_cache[ip]
-    for oid in _RATED_AMPS_OID_CANDIDATES:
+
+    # 1. Configured upperCritical threshold (milliamps)
+    for oid in _RATED_AMPS_THRESHOLD_OIDS:
         raw = snmp_get(ip, oid)
         val = _parse_int(raw) if raw else None
-        if val is not None and 5000 <= val <= 100000:  # 5–100 A in milliamps
+        if val is not None and 5000 <= val <= 200000:  # 5–200 A in milliamps
             amps = round(val / 1000.0, 1)
             _pdu_rated_a_cache[ip] = amps
-            logger.info("PDU %s rated amps detected: %.1f A (via %s)", ip, amps, oid)
+            logger.info("PDU %s rated amps detected: %.1f A (upperCritical via %s)", ip, amps, oid)
             return amps
+
+    # 2. Nameplate rated current string (e.g. "80A")
+    raw = snmp_get(ip, _RATED_AMPS_NAMEPLATE_OID)
+    nameplate_a = _parse_amps_string(raw)
+    if nameplate_a is not None and 1 <= nameplate_a <= 200:
+        _pdu_rated_a_cache[ip] = nameplate_a
+        logger.info("PDU %s rated amps detected: %.1f A (nameplate via %s)", ip, nameplate_a, _RATED_AMPS_NAMEPLATE_OID)
+        return nameplate_a
+
     _pdu_rated_a_cache[ip] = RATED_AMPS_DEFAULT
     logger.warning("PDU %s rated amps auto-detect failed, defaulting to %.0f A", ip, RATED_AMPS_DEFAULT)
     return RATED_AMPS_DEFAULT
