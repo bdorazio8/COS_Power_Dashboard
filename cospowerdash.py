@@ -1901,7 +1901,7 @@ def ui():
               // Per-phase watts not exposed by hardware (e.g. ServerTech PRO4X).
               // Dim placeholder so layout matches Raritan but does not imply real data.
               wattsVal.className = "crt-metric-val unavailable";
-              wattsVal.textContent = "n/a";
+              wattsVal.textContent = "---";
             } else {
               wattsVal.className = "crt-metric-val watts";
               wattsVal.textContent = phase.power_w.toFixed(0);
