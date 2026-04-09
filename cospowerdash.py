@@ -2289,6 +2289,50 @@ def ui():
     color: #94a3b8;
     font-weight: 700;
   }
+
+  /* Report type chooser cards (Reports modal landing page) */
+  .reportCard {
+    display:flex;
+    align-items:center;
+    gap:14px;
+    padding:14px 16px;
+    margin-bottom:10px;
+    background:rgba(37,99,235,0.10);
+    border:1px solid rgba(37,99,235,0.35);
+    border-radius:12px;
+    cursor:pointer;
+    transition: background 0.15s, border-color 0.15s, transform 0.12s;
+  }
+  .reportCard:hover {
+    background:rgba(37,99,235,0.22);
+    border-color:rgba(96,165,250,0.65);
+    transform:translateY(-1px);
+  }
+  .reportCardIcon {
+    flex-shrink:0;
+    width:54px;
+    height:54px;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    background:rgba(37,99,235,0.25);
+    border-radius:11px;
+    color:#93c5fd;
+  }
+  .reportCardIcon svg { width:30px; height:30px; }
+  .reportCardText { flex:1; min-width:0; }
+  .reportCardTitle {
+    font-size:16px;
+    font-weight:800;
+    color:#f1f5f9;
+    margin-bottom:4px;
+    letter-spacing:0.2px;
+  }
+  .reportCardDesc {
+    font-size:12px;
+    color:rgba(148,163,184,0.85);
+    line-height:1.45;
+  }
 </style>
 </head>
 <body>
@@ -2525,21 +2569,65 @@ def ui():
   <div class="modal" id="reportsModal">
     <div id="reportsContent" class="modal-content" style="max-height:85vh;display:flex;flex-direction:column">
       <h3>Reports</h3>
+      <div id="reportsChooser" style="display:none">
+        <div style="font-size:13px;color:rgba(148,163,184,0.85);margin-bottom:14px">Choose a report type:</div>
+        <div class="reportCard" onclick="showOmeFlow()">
+          <div class="reportCardIcon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/>
+              <polyline points="14 3 14 8 19 8"/>
+              <line x1="9" y1="13" x2="15" y2="13"/>
+              <line x1="9" y1="17" x2="15" y2="17"/>
+              <line x1="9" y1="9" x2="11" y2="9"/>
+            </svg>
+          </div>
+          <div class="reportCardText">
+            <div class="reportCardTitle">OME Reports</div>
+            <div class="reportCardDesc">Pre-built fixed reports from OpenManage Enterprise — Power, Energy, GPU, Thermal, and more.</div>
+          </div>
+        </div>
+        <div class="reportCard" onclick="showGraphFlow()">
+          <div class="reportCardIcon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="3" y1="20" x2="21" y2="20"/>
+              <line x1="3" y1="4" x2="3" y2="20"/>
+              <polyline points="6 16 10 11 14 14 19 6"/>
+              <circle cx="6" cy="16" r="1.2" fill="currentColor"/>
+              <circle cx="10" cy="11" r="1.2" fill="currentColor"/>
+              <circle cx="14" cy="14" r="1.2" fill="currentColor"/>
+              <circle cx="19" cy="6"  r="1.2" fill="currentColor"/>
+            </svg>
+          </div>
+          <div class="reportCardText">
+            <div class="reportCardTitle">Graph Report</div>
+            <div class="reportCardDesc">Custom date-range PDF with time-series charts built from Prometheus and Grafana data.</div>
+          </div>
+        </div>
+        <div class="row" style="margin-top:14px">
+          <button onclick="closeReports()">Cancel</button>
+        </div>
+      </div>
       <div id="reportsNotConfigured" style="display:none;padding:12px 0">
         <div style="font-weight:700;color:#f87171;margin-bottom:8px">OME connection not configured.</div>
         <div style="opacity:0.7;font-size:13px;margin-bottom:12px">Go to Settings and configure the OME connection first.</div>
-        <button onclick="closeReports()">OK</button>
+        <div class="row">
+          <button onclick="showReportsChooser()">Back</button>
+          <button onclick="closeReports()">Close</button>
+        </div>
       </div>
       <div id="reportsError" style="display:none;padding:12px 0">
         <div id="reportsErrorMsg" style="font-weight:700;color:#f87171;margin-bottom:12px;white-space:pre-line"></div>
-        <button onclick="closeReports()">OK</button>
+        <div class="row">
+          <button onclick="showReportsChooser()">Back</button>
+          <button onclick="closeReports()">Close</button>
+        </div>
       </div>
       <div id="reportsSelector" style="display:none">
-        <div style="margin-bottom:8px"><span style="color:#cbd5e1;font-weight:600">Select Report:</span></div>
+        <div style="margin-bottom:8px"><span style="color:#cbd5e1;font-weight:600">Select OME Report:</span></div>
         <select id="reportSelect" style="width:100%;padding:10px;border-radius:10px;border:1px solid rgba(255,255,255,0.16);background:#0b1220;color:white;font-size:14px;margin-bottom:10px"></select>
         <div class="row">
           <button class="primary" onclick="runReport()">Generate</button>
-          <button onclick="openGraphReportForm()">Graph Report</button>
+          <button onclick="showReportsChooser()">Back</button>
           <button onclick="closeReports()">Cancel</button>
         </div>
       </div>
@@ -2577,7 +2665,7 @@ def ui():
         <div id="grError" style="color:#f87171;font-size:13px;font-weight:700;margin-bottom:8px;min-height:0"></div>
         <div class="row">
           <button class="primary" onclick="generateGraphReport()">Generate</button>
-          <button onclick="backToReportSelect()">Back</button>
+          <button onclick="showReportsChooser()">Back</button>
           <button onclick="closeReports()">Cancel</button>
         </div>
       </div>
@@ -3773,21 +3861,38 @@ def ui():
   }
 
   // ---------------- Reports ----------------
-  async function openReports() {
-    const modal = document.getElementById("reportsModal");
-    modal.style.display = "flex";
+  // Hide every panel inside the Reports modal. Helper used before showing one.
+  function hideAllReportPanels() {
+    document.getElementById("reportsChooser").style.display = "none";
     document.getElementById("reportsNotConfigured").style.display = "none";
     document.getElementById("reportsError").style.display = "none";
     document.getElementById("reportsSelector").style.display = "none";
     document.getElementById("reportsResults").style.display = "none";
     document.getElementById("reportsActions").style.display = "none";
     document.getElementById("graphReportForm").style.display = "none";
-    document.getElementById("reportsLoading").style.display = "block";
+    document.getElementById("reportsLoading").style.display = "none";
+  }
 
+  function openReports() {
+    document.getElementById("reportsModal").style.display = "flex";
+    showReportsChooser();
+  }
+
+  function showReportsChooser() {
+    hideAllReportPanels();
+    document.getElementById("reportsChooser").style.display = "block";
+  }
+
+  // OME flow: fetch the list of fixed reports, populate the dropdown, show
+  // the OME selector. If OME isn't configured or the fetch fails, show the
+  // not-configured panel (with a Back button to return to the chooser).
+  async function showOmeFlow() {
+    hideAllReportPanels();
+    document.getElementById("reportsLoading").style.display = "block";
     try {
       const res = await fetch("/api/reports/available");
       const data = await res.json();
-      document.getElementById("reportsLoading").style.display = "none";
+      hideAllReportPanels();
       if (!data.ok) {
         document.getElementById("reportsNotConfigured").style.display = "block";
         return;
@@ -3802,17 +3907,21 @@ def ui():
       });
       document.getElementById("reportsSelector").style.display = "block";
     } catch(e) {
-      document.getElementById("reportsLoading").style.display = "none";
+      hideAllReportPanels();
       document.getElementById("reportsNotConfigured").style.display = "block";
     }
+  }
+
+  // Graph Report flow: hide everything else and reuse the existing form opener.
+  function showGraphFlow() {
+    hideAllReportPanels();
+    openGraphReportForm();
   }
 
   function closeReports() {
     document.getElementById("reportsModal").style.display = "none";
     // Reset internal panels so the next openReports() starts in a clean state
-    document.getElementById("graphReportForm").style.display = "none";
-    document.getElementById("reportsResults").style.display = "none";
-    document.getElementById("reportsActions").style.display = "none";
+    hideAllReportPanels();
   }
 
   async function runReport() {
