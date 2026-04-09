@@ -1900,6 +1900,7 @@ def ui():
       <div id="reportsActions" style="display:none;margin-top:10px">
         <div class="row">
           <button onclick="backToReportSelect()">Back</button>
+          <button onclick="downloadReportCsv()">Download CSV</button>
           <button onclick="closeReports()">Close</button>
         </div>
       </div>
@@ -3070,6 +3071,57 @@ def ui():
     document.getElementById("reportsResults").style.display = "none";
     document.getElementById("reportsActions").style.display = "none";
     document.getElementById("reportsSelector").style.display = "block";
+  }
+
+  // CSV download for the currently rendered report. Reads the live
+  // table from the DOM (no extra state) and serves it as a Blob.
+  // IMPORTANT: this code is embedded in a Python triple-quoted string,
+  // so we MUST avoid backslash escape sequences like backslash-n or
+  // backslash-r in JS string literals — Python would convert them to
+  // raw control characters and break the JS parse. Use char codes.
+  function downloadReportCsv() {
+    var table = document.getElementById("reportsTable");
+    if (!table) return;
+    var headerCells = table.querySelectorAll("thead th");
+    if (!headerCells || headerCells.length === 0) return;
+    var LF = String.fromCharCode(10);
+    var CR = String.fromCharCode(13);
+    var EOL = CR + LF;
+    function csvCell(v) {
+      if (v === null || v === undefined) return "";
+      var s = String(v);
+      if (s.indexOf(",") >= 0 || s.indexOf('"') >= 0 || s.indexOf(LF) >= 0 || s.indexOf(CR) >= 0) {
+        return '"' + s.replace(/"/g, '""') + '"';
+      }
+      return s;
+    }
+    var lines = [];
+    var headers = [];
+    headerCells.forEach(function(th) { headers.push(csvCell(th.textContent || "")); });
+    lines.push(headers.join(","));
+    table.querySelectorAll("tbody tr").forEach(function(tr) {
+      var cells = [];
+      tr.querySelectorAll("td").forEach(function(td) { cells.push(csvCell(td.textContent || "")); });
+      lines.push(cells.join(","));
+    });
+    var blob = new Blob([lines.join(EOL)], {type: "text/csv;charset=utf-8;"});
+    var url = URL.createObjectURL(blob);
+    var sel = document.getElementById("reportSelect");
+    var name = "report";
+    if (sel && sel.selectedIndex >= 0 && sel.options[sel.selectedIndex]) {
+      name = sel.options[sel.selectedIndex].textContent || "report";
+    }
+    var safeName = name.replace(/[^A-Za-z0-9._-]+/g, "_");
+    var d = new Date();
+    function pad(n) { return (n < 10 ? "0" : "") + n; }
+    var stamp = d.getFullYear() + pad(d.getMonth() + 1) + pad(d.getDate()) + "_" + pad(d.getHours()) + pad(d.getMinutes());
+    var a = document.createElement("a");
+    a.href = url;
+    a.download = safeName + "_" + stamp + ".csv";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(function() { URL.revokeObjectURL(url); }, 1000);
   }
 
 </script>
