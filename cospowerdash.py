@@ -1911,8 +1911,24 @@ def ui():
   let isEdit = false;
   let draggedId = null;
   let pendingOrderSave = false;
-  let viewportStyle = "racks";
-  let pduLoadStyle = "grouped"; // 'grouped' = three bars stacked below phases, 'inline' = bar inside each phase block
+  // Read persisted view settings synchronously so the very first paint
+  // already reflects the user's saved viewport style. Otherwise the
+  // dashboard renders one frame in the default Racks mode before the
+  // DOMContentLoaded handler reads localStorage and switches modes.
+  let viewportStyle = localStorage.getItem("viewportStyle") || "racks";
+  let pduLoadStyle = (function() {
+    let s = localStorage.getItem("pduLoadStyle") || "grouped";
+    // Legacy migration: old "single" and "split" both map to "grouped"
+    if (s !== "inline") s = "grouped";
+    return s;
+  })();
+  // Apply the fill-mode page override immediately (the .page element
+  // already exists in the DOM by the time this script tag runs, since
+  // the script is at the bottom of <body>).
+  (function() {
+    const page = document.querySelector(".page");
+    if (page && viewportStyle === "fill") page.style.maxWidth = "100%";
+  })();
 
   ws.onmessage = (event) => {
     let incoming = [];
@@ -2402,11 +2418,8 @@ def ui():
       const d = await r.json();
       if (d && d.ok && d.title) applyTitle(d.title);
     } catch(e) {}
-    viewportStyle = localStorage.getItem("viewportStyle") || "racks";
-    let savedLoadStyle = localStorage.getItem("pduLoadStyle") || "grouped";
-    // Legacy migration: old "single" and "split" both map to "grouped"
-    if (savedLoadStyle !== "inline") savedLoadStyle = "grouped";
-    pduLoadStyle = savedLoadStyle;
+    // viewportStyle and pduLoadStyle were already initialized synchronously
+    // from localStorage at script start so the first paint is correct.
     computeRackSize(racksCache.length);
 
     document.getElementById("idracPass").addEventListener("focus", function() {
