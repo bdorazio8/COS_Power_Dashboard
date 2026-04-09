@@ -1333,8 +1333,10 @@ def ui():
     overflow: hidden;
   }
   .pdu-load-section {
-    flex: 0.45 1 0;
-    min-height: 0;
+    /* Fixed-size section so 1-PDU and 2-PDU racks render identical
+       load boxes. Phase blocks above absorb any extra vertical space. */
+    flex: 0 0 auto;
+    height: clamp(22px, 7.5cqi, 56px);
     margin-top: 4px;
     padding: 4px 7px;
     border-top: 2px solid rgba(167,139,250,0.55);
@@ -1344,9 +1346,10 @@ def ui():
     justify-content: center;
     gap: 4px;
     overflow: hidden;
+    box-sizing: border-box;
   }
   .pdu-load-section.split {
-    flex: 1.1 1 0;
+    height: clamp(56px, 21cqi, 150px);
     gap: 3px;
   }
   .pdu-load-row {
