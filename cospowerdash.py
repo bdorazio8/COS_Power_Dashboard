@@ -1725,13 +1725,9 @@ def ui():
   }
   .human-server-header .hdr-cell:first-child {
     padding-left: 0;
-    border-right: 2px solid rgba(226,232,240,0.2);
   }
-  .human-server-tag-sub {
-    font-size: 16px;
-    font-weight: 600;
-    color: #94a3b8;
-    margin-top: 5px;
+  .human-server-header .hdr-cell:not(:last-child) {
+    border-right: 2px solid rgba(226,232,240,0.2);
   }
   .human-server-summary {
     margin-top: 12px;
@@ -3344,8 +3340,8 @@ def ui():
         var serverDiv = document.createElement("div");
         serverDiv.className = "human-server";
 
-        // Model and IP on the same primary heading line (model first),
-        // separated by a faded vertical divider. Identical font for both.
+        // Model | IP | Service Tag on the same primary heading line,
+        // separated by faded vertical dividers. Identical font for all.
         var headerLine = document.createElement("div");
         headerLine.className = "human-server-header";
         var modelSpan = document.createElement("span");
@@ -3354,14 +3350,13 @@ def ui():
         var ipSpan = document.createElement("span");
         ipSpan.className = "hdr-cell";
         ipSpan.textContent = ip;
+        var tagSpan = document.createElement("span");
+        tagSpan.className = "hdr-cell";
+        tagSpan.textContent = "Service Tag: " + tag;
         headerLine.appendChild(modelSpan);
         headerLine.appendChild(ipSpan);
+        headerLine.appendChild(tagSpan);
         serverDiv.appendChild(headerLine);
-
-        var tagLine = document.createElement("div");
-        tagLine.className = "human-server-tag-sub";
-        tagLine.textContent = "Service Tag: " + tag;
-        serverDiv.appendChild(tagLine);
 
       // Aggregate summary
       var firmwares = new Set();
@@ -3505,8 +3500,8 @@ def ui():
       + ".human-server{margin-bottom:14px;margin-left:14px;padding:12px 14px;background:#f8fafc;border-left:3px solid #1e40af;border-radius:4px;page-break-inside:avoid;}"
       + ".human-server-header{display:flex;align-items:stretch;flex-wrap:wrap;line-height:1.2;}"
       + ".human-server-header .hdr-cell{font-family:inherit;font-size:20px;font-weight:800;color:#0f172a;letter-spacing:0.3px;padding:0 14px;line-height:1.2;}"
-      + ".human-server-header .hdr-cell:first-child{padding-left:0;border-right:2px solid #cbd5e1;}"
-      + ".human-server-tag-sub{font-size:14px;font-weight:600;color:#475569;margin-top:4px;}"
+      + ".human-server-header .hdr-cell:first-child{padding-left:0;}"
+      + ".human-server-header .hdr-cell:not(:last-child){border-right:2px solid #cbd5e1;}"
       + ".human-server-summary{margin-top:10px;padding:8px 0;font-size:15px;font-weight:700;color:#1e293b;border-bottom:1px solid #e2e8f0;}"
       + ".human-server-summary.attention{color:#b91c1c;}"
       + ".human-server-summary.healthy{color:#166534;}"
