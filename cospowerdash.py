@@ -2060,6 +2060,19 @@ def ui():
     outline:none;
     display:block;
   }
+  /* Override the white background Chromium applies to autofilled inputs.
+     -webkit-box-shadow inset is the standard trick — autofill sets a
+     background-color that can't be overridden directly, but a giant inset
+     box-shadow paints over it. Long transition delays the autofill flash. */
+  input:-webkit-autofill,
+  input:-webkit-autofill:hover,
+  input:-webkit-autofill:focus,
+  input:-webkit-autofill:active {
+    -webkit-box-shadow: 0 0 0 1000px #0b1220 inset !important;
+    -webkit-text-fill-color: white !important;
+    caret-color: white !important;
+    transition: background-color 9999s ease-in-out 0s;
+  }
 
   .row {
     display:flex;
@@ -2488,13 +2501,13 @@ def ui():
       <h3>Configure Custom Reporting</h3>
       <div style="font-size:12px;color:rgba(148,163,184,0.85);margin-bottom:10px">Used by the Reports → Graph Report feature. Pulls panel renders from Grafana and time-series data from Prometheus.</div>
       <div style="margin-bottom:4px"><span style="color:#cbd5e1;font-weight:600">Prometheus URL:</span></div>
-      <input id="crPromUrl" placeholder="http://prometheus.ailab" style="margin-bottom:8px" />
+      <input id="crPromUrl" style="margin-bottom:8px" />
       <div style="margin-bottom:4px"><span style="color:#cbd5e1;font-weight:600">Grafana URL:</span></div>
-      <input id="crGrafanaUrl" placeholder="http://dashboard.ailab" style="margin-bottom:8px" />
+      <input id="crGrafanaUrl" style="margin-bottom:8px" />
       <div style="margin-bottom:4px"><span style="color:#cbd5e1;font-weight:600">Grafana Credentials:</span></div>
       <div style="display:flex;gap:8px;margin-bottom:8px">
-        <input id="crGrafanaUser" placeholder="Username" style="flex:1;margin-bottom:0" />
-        <input id="crGrafanaPass" type="password" placeholder="Password" style="flex:1;margin-bottom:0" />
+        <input id="crGrafanaUser" style="flex:1;margin-bottom:0" />
+        <input id="crGrafanaPass" type="password" style="flex:1;margin-bottom:0" />
       </div>
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
         <button onclick="testCustomReporting()" style="white-space:nowrap;padding:10px 14px;font-size:13px;background:rgba(37,99,235,0.3);color:#93c5fd;border:1px solid rgba(37,99,235,0.3);border-radius:10px;cursor:pointer;font-weight:700">Test Connection</button>
@@ -2552,16 +2565,14 @@ def ui():
           <div style="font-size:11px;color:rgba(148,163,184,0.7);margin-top:6px">Hour resolution. Up to 90 days back.</div>
         </div>
         <div style="margin-bottom:6px"><span style="color:#cbd5e1;font-weight:600">Scope:</span></div>
-        <div style="margin-bottom:6px">
-          <label style="cursor:pointer"><input type="checkbox" id="grAllRacks" checked onchange="toggleGrAllRacks()" /> All racks</label>
-        </div>
-        <div id="grRackList" style="display:flex;flex-wrap:wrap;gap:6px 14px;margin-bottom:10px;padding-left:18px">
-          <label style="cursor:pointer"><input type="checkbox" class="grCluster" value="R1C2" disabled /> R1C2</label>
-          <label style="cursor:pointer"><input type="checkbox" class="grCluster" value="R2C3" disabled /> R2C3</label>
-          <label style="cursor:pointer"><input type="checkbox" class="grCluster" value="R2C4" disabled /> R2C4</label>
-          <label style="cursor:pointer"><input type="checkbox" class="grCluster" value="R2C5" disabled /> R2C5</label>
-          <label style="cursor:pointer"><input type="checkbox" class="grCluster" value="R2C7" disabled /> R2C7</label>
-          <label style="cursor:pointer"><input type="checkbox" class="grCluster" value="R2C8" disabled /> R2C8</label>
+        <div id="grRackList" style="display:flex;flex-wrap:wrap;gap:6px 14px;margin-bottom:10px">
+          <label style="cursor:pointer"><input type="checkbox" id="grAllRacks" checked /> All</label>
+          <label style="cursor:pointer"><input type="checkbox" class="grCluster" value="R1C2" checked /> R1C2</label>
+          <label style="cursor:pointer"><input type="checkbox" class="grCluster" value="R2C3" checked /> R2C3</label>
+          <label style="cursor:pointer"><input type="checkbox" class="grCluster" value="R2C4" checked /> R2C4</label>
+          <label style="cursor:pointer"><input type="checkbox" class="grCluster" value="R2C5" checked /> R2C5</label>
+          <label style="cursor:pointer"><input type="checkbox" class="grCluster" value="R2C7" checked /> R2C7</label>
+          <label style="cursor:pointer"><input type="checkbox" class="grCluster" value="R2C8" checked /> R2C8</label>
         </div>
         <div id="grError" style="color:#f87171;font-size:13px;font-weight:700;margin-bottom:8px;min-height:0"></div>
         <div class="row">
@@ -4217,13 +4228,19 @@ def ui():
         document.getElementById("grCustomRange").style.display = isCustom ? "block" : "none";
       };
     });
-  }
-
-  function toggleGrAllRacks() {
-    const all = document.getElementById("grAllRacks").checked;
+    // Reset scope checkboxes to "all checked" each time the form opens
+    document.getElementById("grAllRacks").checked = true;
+    document.querySelectorAll(".grCluster").forEach(el => { el.checked = true; });
+    // Wire scope toggle handlers (All ↔ clusters in sync)
+    document.getElementById("grAllRacks").onchange = function() {
+      const checked = this.checked;
+      document.querySelectorAll(".grCluster").forEach(el => { el.checked = checked; });
+    };
     document.querySelectorAll(".grCluster").forEach(el => {
-      el.disabled = all;
-      if (all) el.checked = false;
+      el.onchange = function() {
+        const all = Array.from(document.querySelectorAll(".grCluster"));
+        document.getElementById("grAllRacks").checked = all.every(c => c.checked);
+      };
     });
   }
 
@@ -4244,12 +4261,11 @@ def ui():
       endSec = Math.floor(new Date(e).getTime() / 1000);
       if (endSec <= startSec) { errEl.textContent = "End must be after start"; return; }
     }
-    let clusters = "";
-    if (!document.getElementById("grAllRacks").checked) {
-      const picked = Array.from(document.querySelectorAll(".grCluster:checked")).map(el => el.value);
-      if (picked.length === 0) { errEl.textContent = "Pick at least one rack, or check All racks"; return; }
-      clusters = picked.join(",");
-    }
+    const allCluster = Array.from(document.querySelectorAll(".grCluster"));
+    const picked = allCluster.filter(el => el.checked).map(el => el.value);
+    if (picked.length === 0) { errEl.textContent = "Pick at least one rack"; return; }
+    // If everything is selected, omit the param (backend defaults to all clusters)
+    const clusters = (picked.length === allCluster.length) ? "" : picked.join(",");
     // Quick precheck: confirm custom reporting is configured before opening a tab
     try {
       const cr = await fetch("/api/settings/custom_reporting");
