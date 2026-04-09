@@ -1262,6 +1262,12 @@ def ui():
     flex-direction: column;
     overflow: hidden;
   }
+  .crt-block-total {
+    flex: 0.5 1 0;
+    margin-top: 4px;
+    border-top: 2px solid rgba(167,139,250,0.55);
+    background: rgba(15,23,42,0.35);
+  }
   .crt-label {
     font-weight: 900;
     font-size: 10px;
@@ -1858,7 +1864,7 @@ def ui():
           });
           blocks.forEach(phase => {
             let block = document.createElement("div");
-            block.className = "crt-block";
+            block.className = "crt-block" + (phase.isTotal ? " crt-block-total" : "");
 
             let lbl = document.createElement("div");
             lbl.className = "crt-label";
@@ -1964,7 +1970,7 @@ def ui():
 
       const lbl = block.querySelector(".crt-label");
       const blockH = block.clientHeight || bh;
-      if (lbl) lbl.style.fontSize = Math.max(6, Math.min(bw * 0.035, blockH * 0.12)) + "px";
+      if (lbl) lbl.style.fontSize = Math.max(8, Math.min(bw * 0.055, blockH * 0.2)) + "px";
     });
   }
 
