@@ -25,10 +25,14 @@ DEFAULT_DASH_TITLE = "Power Dashboard"
 # PDU model detection (both Server Tech and Raritan share enterprise 13742)
 OID_PDU_MODEL = "1.3.6.1.4.1.13742.6.3.2.1.1.3.1"
 
-# Server Tech PRO4X — single-phase
+# Server Tech PRO4X — three-phase
 # Inlet aggregate sensors: .1.3.6.1.4.1.13742.6.5.2.3.1.4.1.1.{sensor_type}
-# sensor_type: 1=rmsCurrent(÷1000), 5=activePower(direct W)
+# sensor_type: 1=rmsCurrent(÷1000), 4=rmsVoltage(direct V), 5=activePower(direct W), 7=powerFactor(÷100)
 OID_STECH_INLET_BASE = "1.3.6.1.4.1.13742.6.5.2.3.1.4.1.1"
+# Per-pole (per-phase) sensors: .1.3.6.1.4.1.13742.6.5.3.3.1.4.1.{pole}.{sensor_type}
+# Only rmsCurrent (sensor 1) is exposed on this SKU; voltage and power per-phase are not.
+# Per-phase watts must be derived: phase_current × inlet_voltage × inlet_pf
+OID_STECH_PHASE_BASE = "1.3.6.1.4.1.13742.6.5.3.3.1.4.1"
 
 # Raritan PX3 — 3-phase
 # Per-phase inlet sensors: .1.3.6.1.4.1.13742.6.5.2.4.1.4.1.1.{phase}.{sensor_type}
@@ -561,7 +565,7 @@ async def poll_loop():
                     if pdu_ip not in pdu_ping_cache:
                         pdu_ping_cache[pdu_ip] = ping_ok(pdu_ip)
                     if not pdu_ping_cache[pdu_ip]:
-                        phases_all.append({"pdu_ip": pdu_ip, "pdu_key": pdu_key, "reachable": False, "phases": [
+                        phases_all.append({"pdu_ip": pdu_ip, "pdu_key": pdu_key, "reachable": False, "total_w": None, "phases": [
                             {"label": "Phase " + p, "current_a": 0, "power_w": 0, "reachable": False} for p in ("A", "B", "C")
                         ]})
                         continue
@@ -571,14 +575,20 @@ async def poll_loop():
                     pdu_type = pdu_type_cache[pdu_ip]
 
                     phases = []
+                    total_w: Optional[int] = None
                     if pdu_type == "servertech":
-                        raw_a = snmp_get(pdu_ip, f"{OID_STECH_INLET_BASE}.1")
-                        raw_w = snmp_get(pdu_ip, f"{OID_STECH_INLET_BASE}.5")
-                        amps_raw = _parse_int(raw_a) if raw_a else None
-                        watts_raw = _parse_int(raw_w) if raw_w else None
-                        amps = round(amps_raw / 1000, 2) if amps_raw is not None else 0.0
-                        watts = watts_raw if watts_raw is not None else 0
-                        phases.append({"label": "Total", "current_a": amps, "power_w": watts, "reachable": True})
+                        # PRO4X exposes per-phase current only — not per-phase voltage or watts.
+                        # We deliberately do NOT derive per-phase watts (would be inaccurate on
+                        # unbalanced loads). Per-phase watts are sent as null and dimmed in UI.
+                        # Real, hardware-measured inlet total watts is shown in the total banner.
+                        for phase_idx, phase_label in [(1, "A"), (2, "B"), (3, "C")]:
+                            raw_a = snmp_get(pdu_ip, f"{OID_STECH_PHASE_BASE}.{phase_idx}.1")
+                            amps_raw = _parse_int(raw_a) if raw_a else None
+                            amps = round(amps_raw / 1000, 2) if amps_raw is not None else 0.0
+                            phases.append({"label": "Phase " + phase_label, "current_a": amps, "power_w": None, "reachable": True})
+                        raw_total_w = snmp_get(pdu_ip, f"{OID_STECH_INLET_BASE}.5")
+                        total_w_raw = _parse_int(raw_total_w) if raw_total_w else None
+                        total_w = total_w_raw if total_w_raw is not None else 0
 
                     elif pdu_type == "raritan":
                         for phase_idx, phase_label in [(1, "A"), (2, "B"), (3, "C")]:
@@ -589,10 +599,12 @@ async def poll_loop():
                             amps = round(amps_raw / 1000, 2) if amps_raw is not None else 0.0
                             watts = watts_raw if watts_raw is not None else 0
                             phases.append({"label": "Phase " + phase_label, "current_a": amps, "power_w": watts, "reachable": True})
+                        # Hardware-measured per-phase watts → exact total
+                        total_w = sum(p["power_w"] for p in phases)
                     else:
                         phases = [{"label": "Phase " + p, "current_a": 0, "power_w": 0, "reachable": False} for p in ("A", "B", "C")]
 
-                    phases_all.append({"pdu_ip": pdu_ip, "pdu_key": pdu_key, "reachable": True, "type": pdu_type, "phases": phases})
+                    phases_all.append({"pdu_ip": pdu_ip, "pdu_key": pdu_key, "reachable": True, "type": pdu_type, "phases": phases, "total_w": total_w})
 
                 latest_pdu_phases[rid] = phases_all
 
@@ -1292,6 +1304,21 @@ def ui():
   .crt-metric-val.amps { color: #38bdf8; }
   .crt-metric-val.watts { color: #a78bfa; }
   .crt-metric-val.offline { color: rgba(255,255,255,0.3); font-size: 14px; }
+  .crt-metric-val.unavailable { color: rgba(167,139,250,0.25); font-size: 14px; font-style: italic; }
+  .pdu-total-banner {
+    margin-top: 2px;
+    padding: 2px 10px;
+    text-align: center;
+    font-weight: 900;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: #a78bfa;
+    font-size: clamp(9px, 3.2cqi, 32px);
+    background: rgba(15,23,42,0.7);
+    border: 1px solid rgba(167,139,250,0.25);
+    border-radius: 3px;
+  }
+  .pdu-total-banner.offline { color: rgba(255,255,255,0.3); border-color: rgba(255,255,255,0.1); }
   .no-pdu-msg {
     flex: 1 1 0;
     display: flex;
@@ -1867,12 +1894,17 @@ def ui():
             wattsUnit.className = "crt-metric-unit";
             wattsUnit.textContent = "WATTS";
             let wattsVal = document.createElement("div");
-            if (phase.reachable) {
-              wattsVal.className = "crt-metric-val watts";
-              wattsVal.textContent = phase.power_w.toFixed(0);
-            } else {
+            if (!phase.reachable) {
               wattsVal.className = "crt-metric-val offline";
               wattsVal.textContent = "--";
+            } else if (phase.power_w === null || phase.power_w === undefined) {
+              // Per-phase watts not exposed by hardware (e.g. ServerTech PRO4X).
+              // Dim placeholder so layout matches Raritan but does not imply real data.
+              wattsVal.className = "crt-metric-val unavailable";
+              wattsVal.textContent = "n/a";
+            } else {
+              wattsVal.className = "crt-metric-val watts";
+              wattsVal.textContent = phase.power_w.toFixed(0);
             }
             wattsCol.appendChild(wattsUnit);
             wattsCol.appendChild(wattsVal);
@@ -1881,6 +1913,17 @@ def ui():
             block.appendChild(body);
             serverArea.appendChild(block);
           });
+
+          // Total watts banner — uniform across PDU types
+          let totalBanner = document.createElement("div");
+          totalBanner.className = "pdu-total-banner";
+          if (pdu.reachable && pdu.total_w !== null && pdu.total_w !== undefined) {
+            totalBanner.textContent = "TOTAL: " + Number(pdu.total_w).toFixed(0) + " W";
+          } else {
+            totalBanner.textContent = "TOTAL: -- W";
+            totalBanner.classList.add("offline");
+          }
+          serverArea.appendChild(totalBanner);
         });
       } else {
         let msg = document.createElement("div");
