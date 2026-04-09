@@ -1708,23 +1708,29 @@ def ui():
     border-left: 3px solid #2563eb;
     border-radius: 4px;
   }
+  .human-server-header {
+    display: flex;
+    align-items: baseline;
+    gap: 14px;
+    flex-wrap: wrap;
+    line-height: 1.2;
+  }
   .human-server-ip {
     font-size: 24px;
     font-weight: 900;
     color: #f8fafc;
     letter-spacing: 0.4px;
-    line-height: 1.15;
   }
-  .human-server-model-sub {
-    font-size: 15px;
+  .human-server-model-inline {
+    font-size: 18px;
     font-weight: 700;
     color: #cbd5e1;
-    margin-top: 4px;
   }
   .human-server-tag-sub {
-    font-size: 13px;
+    font-size: 16px;
+    font-weight: 600;
     color: #94a3b8;
-    margin-top: 1px;
+    margin-top: 5px;
   }
   .human-server-summary {
     margin-top: 12px;
@@ -3337,16 +3343,18 @@ def ui():
         var serverDiv = document.createElement("div");
         serverDiv.className = "human-server";
 
-        // IP is now the primary heading, model second, service tag third
-        var ipLine = document.createElement("div");
-        ipLine.className = "human-server-ip";
-        ipLine.textContent = ip;
-        serverDiv.appendChild(ipLine);
-
-        var modelLine = document.createElement("div");
-        modelLine.className = "human-server-model-sub";
-        modelLine.textContent = model;
-        serverDiv.appendChild(modelLine);
+        // IP and Model on the same primary heading line, service tag below
+        var headerLine = document.createElement("div");
+        headerLine.className = "human-server-header";
+        var ipSpan = document.createElement("span");
+        ipSpan.className = "human-server-ip";
+        ipSpan.textContent = ip;
+        var modelSpan = document.createElement("span");
+        modelSpan.className = "human-server-model-inline";
+        modelSpan.textContent = model;
+        headerLine.appendChild(ipSpan);
+        headerLine.appendChild(modelSpan);
+        serverDiv.appendChild(headerLine);
 
         var tagLine = document.createElement("div");
         tagLine.className = "human-server-tag-sub";
@@ -3493,9 +3501,10 @@ def ui():
       + ".human-rack-header{margin:18px 0 10px 0;padding:6px 12px;font-size:18px;font-weight:900;color:#0f172a;background:#dbeafe;border-left:5px solid #1d4ed8;border-radius:3px;text-transform:uppercase;letter-spacing:1px;page-break-after:avoid;}"
       + ".human-rack-header:first-child{margin-top:0;}"
       + ".human-server{margin-bottom:14px;margin-left:14px;padding:12px 14px;background:#f8fafc;border-left:3px solid #1e40af;border-radius:4px;page-break-inside:avoid;}"
-      + ".human-server-ip{font-size:22px;font-weight:900;color:#0f172a;line-height:1.15;}"
-      + ".human-server-model-sub{font-size:14px;font-weight:700;color:#1e293b;margin-top:4px;}"
-      + ".human-server-tag-sub{font-size:12px;color:#475569;margin-top:1px;}"
+      + ".human-server-header{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;line-height:1.2;}"
+      + ".human-server-ip{font-size:22px;font-weight:900;color:#0f172a;}"
+      + ".human-server-model-inline{font-size:16px;font-weight:700;color:#1e293b;}"
+      + ".human-server-tag-sub{font-size:14px;font-weight:600;color:#475569;margin-top:4px;}"
       + ".human-server-summary{margin-top:10px;padding:8px 0;font-size:15px;font-weight:700;color:#1e293b;border-bottom:1px solid #e2e8f0;}"
       + ".human-server-summary.attention{color:#b91c1c;}"
       + ".human-server-summary.healthy{color:#166534;}"
