@@ -1317,98 +1317,96 @@ def api_graph_report(start: int = 0, end: int = 0, clusters: str = ""):
                  ha="center", fontsize=8, color="#888")
         pdf.savefig(fig); plt.close(fig); pages_written += 1
 
-        # ---------- Page 2: Lab total power timeline (Grafana render) ----------
-        # Lab Summary uid → "Total Server Power" panel id 6
-        png = _grafana_render_panel(grafana_url, grafana_user, grafana_pass,
-                                    "97551388-ac8a-45e2-bdb4-be9422d14a84", 6,
-                                    start_ms, end_ms, width=1100, height=420)
-        fig = plt.figure(figsize=(8.5, 11))
-        fig.text(0.5, 0.95, "Lab — Total Server Power", ha="center", fontsize=16, fontweight="bold")
-        fig.text(0.5, 0.92, "Source: Grafana / Lab Summary", ha="center", fontsize=9, color="#666")
-        if png:
-            try:
-                import matplotlib.image as mpimg
-                img = mpimg.imread(io.BytesIO(png), format="png")
-                ax = fig.add_axes([0.05, 0.45, 0.90, 0.45])
-                ax.imshow(img); ax.axis("off")
-            except Exception as e:
-                fig.text(0.5, 0.6, f"(failed to embed render: {e})", ha="center", color="red")
-                warnings.append(f"lab total render embed: {e}")
-        else:
-            fig.text(0.5, 0.6, "(Grafana render unavailable)", ha="center", color="#a00")
-            warnings.append("lab total render: unavailable")
-
-        # Below the render: a matplotlib mini-summary from Prometheus
-        series = _prom_query_range(prom_url,
-            f'sum(power{{sensor="total",server=~"{scope_regex}"}}) / 1000',
-            start, end, step)
-        if series:
-            ax2 = fig.add_axes([0.10, 0.10, 0.80, 0.28])
+        # ---------- Timeseries chart helper ----------
+        # All timeseries pages render via this helper. Each chart fits into the
+        # axis you give it. Two charts per page = (2 rows, 1 col) subplot grid.
+        # NOTE: Grafana panel embedding is shelved until the image-renderer
+        # plugin is installed on the Grafana server. _grafana_render_panel()
+        # is left in the file for that future flip.
+        from datetime import datetime
+        def _draw_timeseries(ax, query, ylabel, title, scale=1.0, label_key="server", max_legend=8):
+            series = _prom_query_range(prom_url, query, start, end, step)
+            if not series:
+                ax.text(0.5, 0.5, "(no data)", ha="center", va="center",
+                        transform=ax.transAxes, color="#a00", fontsize=10)
+                ax.set_title(title, fontsize=10, fontweight="bold")
+                return
+            n_lines = 0
             for s in series:
-                xs = [_time.localtime(float(p[0])) for p in s["values"]]
-                xs_dt = [_time.strftime("%H:%M", t) for t in xs]
-                ys = [float(p[1]) for p in s["values"]]
-                ax2.plot(range(len(ys)), ys, linewidth=1.2, color="#1e40af")
-                # Sparse x labels: show 6 ticks
-                if len(xs_dt) > 6:
-                    idxs = [int(i*(len(xs_dt)-1)/5) for i in range(6)]
-                    ax2.set_xticks(idxs)
-                    ax2.set_xticklabels([xs_dt[i] for i in idxs], fontsize=7)
-            ax2.set_title("Prometheus query: sum(power{sensor=\"total\"}) / 1000", fontsize=9)
-            ax2.set_ylabel("kW", fontsize=9)
-            ax2.grid(True, alpha=0.3)
+                xs = [datetime.fromtimestamp(float(p[0])) for p in s["values"]]
+                ys = [float(p[1]) * scale for p in s["values"]]
+                lbl = s.get("metric", {}).get(label_key, "")
+                ax.plot(xs, ys, linewidth=1.0, label=lbl if lbl else None)
+                n_lines += 1
+            ax.set_title(title, fontsize=10, fontweight="bold")
+            ax.set_ylabel(ylabel, fontsize=9)
+            ax.grid(True, alpha=0.3)
+            ax.tick_params(axis="both", labelsize=7)
+            # Date formatting on x-axis
+            locator = mdates.AutoDateLocator()
+            ax.xaxis.set_major_locator(locator)
+            # Pick formatter based on duration
+            if duration_s <= 36 * 3600:
+                fmtr = mdates.DateFormatter("%H:%M")
+            elif duration_s <= 7 * 86400:
+                fmtr = mdates.DateFormatter("%m/%d %H:%M")
+            else:
+                fmtr = mdates.DateFormatter("%m/%d")
+            ax.xaxis.set_major_formatter(fmtr)
+            for label_obj in ax.get_xticklabels():
+                label_obj.set_rotation(0)
+            # Legend only if it fits
+            if 0 < n_lines <= max_legend and any(s.get("metric", {}).get(label_key) for s in series):
+                ax.legend(fontsize=6, loc="upper right", ncol=2, framealpha=0.85)
+
+        def _new_2up_figure(page_title):
+            """Create a portrait letter figure with a 2-row, 1-col chart grid
+            and a centered page title. Returns (fig, ax_top, ax_bottom)."""
+            fig = plt.figure(figsize=(8.5, 11))
+            fig.text(0.5, 0.96, page_title, ha="center", fontsize=14, fontweight="bold")
+            ax_top = fig.add_axes([0.10, 0.55, 0.82, 0.34])
+            ax_bot = fig.add_axes([0.10, 0.10, 0.82, 0.34])
+            return fig, ax_top, ax_bot
+
+        # ---------- Page 2: Lab overview — 2 charts ----------
+        fig, ax_top, ax_bot = _new_2up_figure("Lab Overview")
+        _draw_timeseries(
+            ax_top,
+            f'sum(power{{sensor="total",server=~"{scope_regex}"}}) / 1000',
+            "kW", "Total Server Power (kW)",
+            label_key="__none__", max_legend=0,
+        )
+        _draw_timeseries(
+            ax_bot,
+            f'sum(DCGM_FI_DEV_POWER_USAGE) / 1000',
+            "kW", "Total NVIDIA GPU Power (kW)",
+            label_key="__none__", max_legend=0,
+        )
         pdf.savefig(fig); plt.close(fig); pages_written += 1
 
-        # ---------- Page 3: Per-cluster timelines (Grafana renders, one per page) ----------
-        # Each cluster summary dashboard has uid + panelId for its kW timeseries.
-        # R1C2 confirmed: uid 12447112-..., panel 8 ("Total R1C2 Server Power (kW)")
-        # The other clusters mirror the structure but have their own uids — we
-        # fall back to a Prometheus matplotlib chart if a render is unavailable.
-        cluster_grafana = {
-            "R1C2": ("12447112-0fea-4f17-bf12-1295ac7c6812", 8),
-        }
-        for label, regex in selected_clusters:
-            fig = plt.figure(figsize=(8.5, 11))
-            fig.text(0.5, 0.95, f"Cluster {label} — Server Power", ha="center", fontsize=16, fontweight="bold")
-            embedded = False
-            if label in cluster_grafana:
-                uid, pid = cluster_grafana[label]
-                png = _grafana_render_panel(grafana_url, grafana_user, grafana_pass, uid, pid,
-                                            start_ms, end_ms, width=1100, height=460)
-                if png:
-                    try:
-                        import matplotlib.image as mpimg
-                        img = mpimg.imread(io.BytesIO(png), format="png")
-                        ax = fig.add_axes([0.05, 0.40, 0.90, 0.50])
-                        ax.imshow(img); ax.axis("off")
-                        fig.text(0.5, 0.92, "Source: Grafana / Cluster Summary", ha="center", fontsize=9, color="#666")
-                        embedded = True
-                    except Exception as e:
-                        warnings.append(f"{label} render embed: {e}")
-            if not embedded:
-                fig.text(0.5, 0.92, "Source: Prometheus (Grafana render unavailable)", ha="center", fontsize=9, color="#a06")
-                ax = fig.add_axes([0.10, 0.40, 0.80, 0.50])
-                series = _prom_query_range(prom_url,
+        # ---------- Cluster pages — 2 clusters per page ----------
+        for i in range(0, len(selected_clusters), 2):
+            pair = selected_clusters[i:i+2]
+            fig, ax_top, ax_bot = _new_2up_figure("Cluster Server Power")
+            for ax_obj, (label, regex) in zip([ax_top, ax_bot], pair):
+                _draw_timeseries(
+                    ax_obj,
                     f'power{{sensor="total",server=~"{regex}"}}',
-                    start, end, step)
-                for s in series:
-                    srv = s["metric"].get("server", "?")
-                    ys = [float(p[1]) for p in s["values"]]
-                    ax.plot(range(len(ys)), ys, linewidth=1.0, label=srv)
-                ax.set_ylabel("Watts")
-                ax.grid(True, alpha=0.3)
-                ax.legend(fontsize=7, loc="upper right", ncol=2)
-
-            # kWh stat for this cluster
-            kwh_res = _prom_query(prom_url,
-                f'(sum(increase(power{{sensor="total",server=~"{regex}"}}[{duration_s}s]))) / 3600 / 1000',
-                t=end)
-            kwh_val = None
-            if kwh_res:
-                try: kwh_val = float(kwh_res[0]["value"][1])
-                except Exception: pass
-            fig.text(0.5, 0.32, f"Cluster Energy: {_fmt(kwh_val, ' kWh')}",
-                     ha="center", fontsize=12, fontweight="bold", color="#1e3a8a")
+                    "Watts", f"{label} — per server",
+                    label_key="server",
+                )
+                # Append cluster kWh next to the title
+                kwh_res = _prom_query(
+                    prom_url,
+                    f'(sum_over_time((sum(power{{sensor="total",server=~"{regex}"}}))[{duration_s}s:{step}s])) * {step} / 3600 / 1000',
+                    t=end,
+                )
+                kwh_val = None
+                if kwh_res:
+                    try: kwh_val = float(kwh_res[0]["value"][1])
+                    except Exception: pass
+                ax_obj.set_title(f"{label} — per server   |   {_fmt(kwh_val, ' kWh')} in window",
+                                 fontsize=10, fontweight="bold")
             pdf.savefig(fig); plt.close(fig); pages_written += 1
 
         # ---------- Page N: Per-server table ----------
