@@ -1363,14 +1363,14 @@ def ui():
   .pdu-load-row-label {
     flex: 0 0 auto;
     font-weight: 900;
-    font-size: clamp(9px, 3cqi, 28px);
+    font-size: clamp(13px, 4.4cqi, 40px);
     color: rgba(226,232,240,0.92);
     white-space: nowrap;
     letter-spacing: 0.3px;
     text-align: right;
-    min-width: 2.6em;
+    min-width: 3.4em;
   }
-  .pdu-load-section.split .pdu-load-row-label { font-size: clamp(8px, 2.4cqi, 20px); min-width: 3.2em; }
+  .pdu-load-section.split .pdu-load-row-label { font-size: clamp(11px, 3.6cqi, 30px); min-width: 4em; }
   .pdu-load-track {
     flex: 1 1 0;
     min-width: 0;
