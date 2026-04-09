@@ -1392,6 +1392,16 @@ def ui():
   .pdu-load-seg.on-amber { background: #f59e0b; box-shadow: 0 0 4px rgba(245,158,11,0.45); }
   .pdu-load-seg.on-red   { background: #ef4444; box-shadow: 0 0 4px rgba(239,68,68,0.45); }
   .pdu-load-row-label.offline { color: rgba(255,255,255,0.3); }
+  /* Inline load bar inside each phase block (alternate render style) */
+  .crt-block .pdu-load-track.inline-loadbar {
+    flex: 0 0 auto;
+    height: clamp(8px, 2.4cqi, 20px);
+    margin-top: 3px;
+    margin-bottom: 1px;
+  }
+  .crt-block .pdu-load-track.inline-loadbar .pdu-load-seg {
+    border-right-width: 1px;
+  }
   .crt-label {
     font-weight: 900;
     font-size: 10px;
@@ -1746,8 +1756,8 @@ def ui():
       </div>
       <div style="margin-top:12px;display:flex;align-items:center;gap:12px">
         <span style="color:#cbd5e1;font-weight:600;white-space:nowrap">PDU Load Style:</span>
-        <label style="cursor:pointer;white-space:nowrap"><input type="radio" name="pduLoadStyle" value="single" id="loadSingle" checked /> Single Bar</label>
-        <label style="cursor:pointer;white-space:nowrap"><input type="radio" name="pduLoadStyle" value="split" id="loadSplit" /> Per-Phase Bars</label>
+        <label style="cursor:pointer;white-space:nowrap"><input type="radio" name="pduLoadStyle" value="grouped" id="loadGrouped" checked /> Grouped Below</label>
+        <label style="cursor:pointer;white-space:nowrap"><input type="radio" name="pduLoadStyle" value="inline" id="loadInline" /> Inline In Phase</label>
       </div>
       <div style="margin-top:16px;border-top:1px solid rgba(255,255,255,0.08);padding-top:12px">
         <div style="margin-bottom:4px"><span style="color:#cbd5e1;font-weight:600">iDRAC Credentials:</span></div>
@@ -1825,7 +1835,7 @@ def ui():
   let draggedId = null;
   let pendingOrderSave = false;
   let viewportStyle = "racks";
-  let pduLoadStyle = "single"; // 'single' = one bar, 'split' = three per-phase bars
+  let pduLoadStyle = "grouped"; // 'grouped' = three bars stacked below phases, 'inline' = bar inside each phase block
 
   ws.onmessage = (event) => {
     let incoming = [];
@@ -1984,6 +1994,7 @@ def ui():
           serverArea.appendChild(pduBanner);
 
           // 3 phase boxes
+          const ratedAForInline = (pdu.rated_a && pdu.rated_a > 0) ? pdu.rated_a : 30;
           const blocks = (pdu.phases || []).slice();
           blocks.forEach(phase => {
             let block = document.createElement("div");
@@ -2037,11 +2048,18 @@ def ui():
             body.appendChild(wattsCol);
 
             block.appendChild(body);
+
+            // Inline load bar at the bottom of the phase block (only when style=inline)
+            if (pduLoadStyle === "inline") {
+              block.appendChild(buildInlineLoadBar(phase, ratedAForInline));
+            }
+
             serverArea.appendChild(block);
           });
 
-          // Load section — replaces the old Total block, two render styles
-          serverArea.appendChild(buildLoadSection(pdu));
+          // Grouped load section below all phases (only when style=grouped)
+          const loadSection = buildLoadSection(pdu);
+          if (loadSection) serverArea.appendChild(loadSection);
         });
       } else {
         let msg = document.createElement("div");
@@ -2070,17 +2088,27 @@ def ui():
   }
 
   const PDU_LOAD_SEGMENTS = 30;
+  const PDU_LOAD_SEGMENTS_INLINE = 15;
 
-  function buildSegmentedTrack(pct, available) {
+  function buildSegmentedTrack(pct, available, segmentCount) {
+    const n = segmentCount || PDU_LOAD_SEGMENTS;
     const track = document.createElement("div");
     track.className = "pdu-load-track";
-    const lit = available ? Math.round((Math.min(100, Math.max(0, pct)) / 100) * PDU_LOAD_SEGMENTS) : 0;
+    const lit = available ? Math.round((Math.min(100, Math.max(0, pct)) / 100) * n) : 0;
     const colorCls = available ? "on-" + loadColorClass(pct) : "";
-    for (let s = 0; s < PDU_LOAD_SEGMENTS; s++) {
+    for (let s = 0; s < n; s++) {
       const seg = document.createElement("div");
       seg.className = "pdu-load-seg" + (s < lit ? " " + colorCls : "");
       track.appendChild(seg);
     }
+    return track;
+  }
+
+  function buildInlineLoadBar(phase, ratedA) {
+    const available = phase.reachable && ratedA > 0;
+    const pct = available ? Math.min(100, (phase.current_a / ratedA) * 100) : 0;
+    const track = buildSegmentedTrack(pct, available, PDU_LOAD_SEGMENTS_INLINE);
+    track.classList.add("inline-loadbar");
     return track;
   }
 
@@ -2096,30 +2124,21 @@ def ui():
   }
 
   function buildLoadSection(pdu) {
+    // Inline mode renders bars inside each phase block, not in a section.
+    if (pduLoadStyle === "inline") return null;
+
     const section = document.createElement("div");
-    section.className = "pdu-load-section";
+    section.className = "pdu-load-section split";
 
     const ratedA = (pdu.rated_a && pdu.rated_a > 0) ? pdu.rated_a : 30;
     const phases = pdu.phases || [];
 
-    if (pduLoadStyle === "split") {
-      // Style 2 — three per-phase segmented bars stacked
-      section.classList.add("split");
-      phases.forEach(phase => {
-        const letter = (phase.label || "").replace("Phase ", "");
-        const available = phase.reachable && ratedA > 0;
-        const pct = available ? Math.min(100, (phase.current_a / ratedA) * 100) : 0;
-        section.appendChild(buildLoadRow(letter, pct, available));
-      });
-    } else {
-      // Style 1 (default) — single segmented bar showing max-phase load
-      section.classList.add("single");
-      const reachablePhases = phases.filter(p => p.reachable);
-      const available = reachablePhases.length > 0 && ratedA > 0;
-      const maxA = available ? Math.max(...reachablePhases.map(p => p.current_a || 0)) : 0;
-      const pct = available ? Math.min(100, (maxA / ratedA) * 100) : 0;
-      section.appendChild(buildLoadRow("LOAD", pct, available));
-    }
+    phases.forEach(phase => {
+      const letter = (phase.label || "").replace("Phase ", "");
+      const available = phase.reachable && ratedA > 0;
+      const pct = available ? Math.min(100, (phase.current_a / ratedA) * 100) : 0;
+      section.appendChild(buildLoadRow(letter, pct, available));
+    });
     return section;
   }
 
@@ -2307,7 +2326,10 @@ def ui():
       if (d && d.ok && d.title) applyTitle(d.title);
     } catch(e) {}
     viewportStyle = localStorage.getItem("viewportStyle") || "racks";
-    pduLoadStyle = localStorage.getItem("pduLoadStyle") || "single";
+    let savedLoadStyle = localStorage.getItem("pduLoadStyle") || "grouped";
+    // Legacy migration: old "single" and "split" both map to "grouped"
+    if (savedLoadStyle !== "inline") savedLoadStyle = "grouped";
+    pduLoadStyle = savedLoadStyle;
     computeRackSize(racksCache.length);
 
     document.getElementById("idracPass").addEventListener("focus", function() {
@@ -2663,7 +2685,7 @@ def ui():
     const current = document.getElementById("dashTitle").innerText || "";
     document.getElementById("titleInput").value = current.trim();
     document.getElementById(viewportStyle === "fill" ? "vpFill" : "vpRacks").checked = true;
-    document.getElementById(pduLoadStyle === "split" ? "loadSplit" : "loadSingle").checked = true;
+    document.getElementById(pduLoadStyle === "inline" ? "loadInline" : "loadGrouped").checked = true;
     document.getElementById("idracTestResult").textContent = "";
     document.getElementById("idracTestIp").value = "";
     try {
