@@ -1395,7 +1395,7 @@ def ui():
   /* Inline load bar inside each phase block (alternate render style) */
   .crt-block .pdu-load-track.inline-loadbar {
     flex: 0 0 auto;
-    height: clamp(8px, 2.4cqi, 20px);
+    height: clamp(12px, 3.6cqi, 30px);
     margin-top: 3px;
     margin-bottom: 1px;
   }
@@ -2110,7 +2110,7 @@ def ui():
   }
 
   const PDU_LOAD_SEGMENTS = 30;
-  const PDU_LOAD_SEGMENTS_INLINE = 15;
+  const PDU_LOAD_SEGMENTS_INLINE = 30;
 
   function buildSegmentedTrack(pct, available, segmentCount) {
     const n = segmentCount || PDU_LOAD_SEGMENTS;
