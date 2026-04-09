@@ -1900,6 +1900,7 @@ def ui():
       <div id="reportsActions" style="display:none;margin-top:10px">
         <div class="row">
           <button onclick="backToReportSelect()">Back</button>
+          <button onclick="downloadReportCsv()">Download CSV</button>
           <button onclick="closeReports()">Close</button>
         </div>
       </div>
@@ -3034,7 +3035,12 @@ def ui():
     }
   }
 
+  let lastReport = null; // {name, columns, rows} — for CSV download
+
   function renderReportTable(columns, rows) {
+    const sel = document.getElementById("reportSelect");
+    const reportName = sel.options[sel.selectedIndex] ? sel.options[sel.selectedIndex].textContent : "report";
+    lastReport = {name: reportName, columns: columns, rows: rows};
     const head = document.getElementById("reportsHead");
     const body = document.getElementById("reportsBody");
     head.innerHTML = "";
@@ -3062,6 +3068,42 @@ def ui():
     document.getElementById("reportsContent").style.maxWidth = "98vw";
     document.getElementById("reportsResults").style.display = "block";
     document.getElementById("reportsActions").style.display = "block";
+  }
+
+  function csvEscape(val) {
+    if (val === null || val === undefined) return "";
+    const s = String(val);
+    if (s.includes('"') || s.includes(",") || s.includes("\n") || s.includes("\r")) {
+      return '"' + s.replace(/"/g, '""') + '"';
+    }
+    return s;
+  }
+
+  function downloadReportCsv() {
+    if (!lastReport) return;
+    const lines = [];
+    lines.push(lastReport.columns.map(csvEscape).join(","));
+    lastReport.rows.forEach(row => {
+      lines.push(row.map(csvEscape).join(","));
+    });
+    const csv = lines.join("\r\n");
+    const blob = new Blob([csv], {type: "text/csv;charset=utf-8;"});
+    const url = URL.createObjectURL(blob);
+    const safeName = (lastReport.name || "report").replace(/[^A-Za-z0-9._-]+/g, "_");
+    const now = new Date();
+    const stamp = now.getFullYear()
+      + String(now.getMonth() + 1).padStart(2, "0")
+      + String(now.getDate()).padStart(2, "0")
+      + "_"
+      + String(now.getHours()).padStart(2, "0")
+      + String(now.getMinutes()).padStart(2, "0");
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = safeName + "_" + stamp + ".csv";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
   function backToReportSelect() {
