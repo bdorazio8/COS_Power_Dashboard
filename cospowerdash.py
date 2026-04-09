@@ -1775,6 +1775,7 @@ def ui():
     letter-spacing: 0.4px;
     flex: 1 1 auto;
     min-width: 0;
+    text-align: center;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -3510,7 +3511,7 @@ def ui():
       + ".human-gpu-list{list-style:none;margin:10px 0 0 0;padding:0;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:5px 8px;}"
       + ".human-gpu-list li{display:flex;align-items:baseline;gap:6px;padding:5px 8px;font-size:12px;background:#eef2f7;border-left:3px solid #cbd5e1;border-radius:2px;color:#1e293b;overflow:hidden;}"
       + ".human-gpu-list li .slot-num{font-weight:900;font-size:14px;color:#0f172a;min-width:1.5em;}"
-      + ".human-gpu-list li .serial{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px;font-weight:700;color:#0f172a;letter-spacing:0.4px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}"
+      + ".human-gpu-list li .serial{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px;font-weight:700;color:#0f172a;letter-spacing:0.4px;flex:1;min-width:0;text-align:center;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}"
       + ".human-gpu-list li .status{font-weight:800;font-size:11px;color:#166534;}"
       + ".human-gpu-list li.abnormal{background:#fee2e2;border-left-color:#dc2626;color:#7f1d1d;}"
       + ".human-gpu-list li.abnormal .slot-num{color:#7f1d1d;}"
