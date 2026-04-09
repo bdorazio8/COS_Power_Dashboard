@@ -1283,7 +1283,7 @@ def api_graph_report(start: int = 0, end: int = 0, clusters: str = ""):
                 cover_vals[k] = None
 
         fig = plt.figure(figsize=(8.5, 11))
-        fig.text(0.5, 0.92, "Power Graph Report", ha="center", fontsize=22, fontweight="bold")
+        fig.text(0.5, 0.92, "Lab Overview Report", ha="center", fontsize=22, fontweight="bold")
         fig.text(0.5, 0.88, get_setting("dashboard_title", DEFAULT_DASH_TITLE), ha="center", fontsize=12, color="#444")
         start_str = _time.strftime("%Y-%m-%d %H:%M %Z", _time.localtime(start))
         end_str   = _time.strftime("%Y-%m-%d %H:%M %Z", _time.localtime(end))
@@ -1510,14 +1510,14 @@ def api_graph_report(start: int = 0, end: int = 0, clusters: str = ""):
 
         # PDF metadata
         d = pdf.infodict()
-        d["Title"] = f"COS Power Graph Report {start_str} to {end_str}"
+        d["Title"] = f"Lab Overview Report {start_str} to {end_str}"
         d["Author"] = "cospowerdash"
-        d["Subject"] = "Power graph report"
+        d["Subject"] = "Lab overview report"
 
     pdf_buf.seek(0)
     fn_start = _time.strftime("%Y-%m-%d_%H%M", _time.localtime(start))
     fn_end   = _time.strftime("%Y-%m-%d_%H%M", _time.localtime(end))
-    filename = f"cospower_graph_report_{fn_start}_to_{fn_end}.pdf"
+    filename = f"lab_overview_report_{fn_start}_to_{fn_end}.pdf"
     headers = {
         "Content-Disposition": f'inline; filename="{filename}"',
         "X-Report-Pages": str(pages_written),
@@ -2543,7 +2543,7 @@ def ui():
   <div class="modal" id="customReportingModal">
     <div class="modal-content">
       <h3>Configure Custom Reporting</h3>
-      <div style="font-size:12px;color:rgba(148,163,184,0.85);margin-bottom:10px">Used by the Reports → Graph Report feature. Pulls panel renders from Grafana and time-series data from Prometheus.</div>
+      <div style="font-size:12px;color:rgba(148,163,184,0.85);margin-bottom:10px">Used by the Reports → Lab Overview Report feature. Pulls panel renders from Grafana and time-series data from Prometheus.</div>
       <div style="margin-bottom:4px"><span style="color:#cbd5e1;font-weight:600">Prometheus URL:</span></div>
       <input id="crPromUrl" style="margin-bottom:8px" />
       <div style="margin-bottom:4px"><span style="color:#cbd5e1;font-weight:600">Grafana URL:</span></div>
@@ -2571,21 +2571,6 @@ def ui():
       <h3>Reports</h3>
       <div id="reportsChooser" style="display:none">
         <div style="font-size:13px;color:rgba(148,163,184,0.85);margin-bottom:14px">Choose a report type:</div>
-        <div class="reportCard" onclick="showOmeFlow()">
-          <div class="reportCardIcon">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/>
-              <polyline points="14 3 14 8 19 8"/>
-              <line x1="9" y1="13" x2="15" y2="13"/>
-              <line x1="9" y1="17" x2="15" y2="17"/>
-              <line x1="9" y1="9" x2="11" y2="9"/>
-            </svg>
-          </div>
-          <div class="reportCardText">
-            <div class="reportCardTitle">OME Reports</div>
-            <div class="reportCardDesc">Pre-built fixed reports from OpenManage Enterprise — Power, Energy, GPU, Thermal, and more.</div>
-          </div>
-        </div>
         <div class="reportCard" onclick="showGraphFlow()">
           <div class="reportCardIcon">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -2599,8 +2584,23 @@ def ui():
             </svg>
           </div>
           <div class="reportCardText">
-            <div class="reportCardTitle">Graph Report</div>
+            <div class="reportCardTitle">Lab Overview Report</div>
             <div class="reportCardDesc">Custom date-range PDF with time-series charts built from Prometheus and Grafana data.</div>
+          </div>
+        </div>
+        <div class="reportCard" onclick="showOmeFlow()">
+          <div class="reportCardIcon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/>
+              <polyline points="14 3 14 8 19 8"/>
+              <line x1="9" y1="13" x2="15" y2="13"/>
+              <line x1="9" y1="17" x2="15" y2="17"/>
+              <line x1="9" y1="9" x2="11" y2="9"/>
+            </svg>
+          </div>
+          <div class="reportCardText">
+            <div class="reportCardTitle">OME Reports</div>
+            <div class="reportCardDesc">Pre-built fixed reports from OpenManage Enterprise — Power, Energy, GPU, Thermal, and more.</div>
           </div>
         </div>
         <div class="row" style="margin-top:14px">
@@ -2632,7 +2632,7 @@ def ui():
         </div>
       </div>
       <div id="graphReportForm" style="display:none">
-        <div style="margin-bottom:8px"><span style="color:#cbd5e1;font-weight:600">Graph Report</span></div>
+        <div style="margin-bottom:8px"><span style="color:#cbd5e1;font-weight:600">Lab Overview Report</span></div>
         <div style="font-size:12px;color:rgba(148,163,184,0.85);margin-bottom:10px">Generates a PDF combining Grafana panel renders and Prometheus charts for the selected window.</div>
         <div style="margin-bottom:8px"><span style="color:#cbd5e1;font-weight:600">Time Range:</span></div>
         <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:10px">
