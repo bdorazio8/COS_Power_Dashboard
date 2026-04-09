@@ -989,14 +989,22 @@ def api_run_report(data: dict):
     token = _ome_session()
     if not token:
         return {"ok": False, "error": "OME not configured or auth failed"}
-    # Collect configured server iDRAC IPs from racks (Edit Rack dialog)
+    # Collect configured server iDRAC IPs from racks (Edit Rack dialog).
+    # Also build rack_assignments (ip -> rack label) and rack_order so the
+    # frontend can group the human-readable view by rack.
     all_servers = get_all_servers()
+    racks_list = get_racks()
+    rack_id_to_label = {r["id"]: r["label"] for r in racks_list}
+    rack_order = [r["label"] for r in racks_list]
+    rack_assignments: Dict[str, str] = {}
     configured_ips = set()
-    for rack_servers in all_servers.values():
+    for rack_id, rack_servers in all_servers.items():
+        label = rack_id_to_label.get(rack_id, "Unassigned")
         for srv in rack_servers:
             ip = (srv.get("idrac_ip") or "").strip()
             if ip:
                 configured_ips.add(ip)
+                rack_assignments[ip] = label
     if not configured_ips:
         return {"ok": False, "error": "No servers configured in dashboard.\nAdd servers to racks first."}
     # Lowercase for case-insensitive matching against report cells
@@ -1040,7 +1048,13 @@ def api_run_report(data: dict):
             "Configured: %s. Sample row cells: %s",
             report_id, len(raw_rows), sorted(configured_ips), sample,
         )
-    return {"ok": True, "columns": columns, "rows": rows}
+    return {
+        "ok": True,
+        "columns": columns,
+        "rows": rows,
+        "rack_assignments": rack_assignments,
+        "rack_order": rack_order,
+    }
 
 # ----------------------------
 # Systems API
@@ -1673,23 +1687,44 @@ def ui():
     color: #e2e8f0;
     line-height: 1.55;
   }
+  .human-rack-header {
+    margin: 18px 0 10px 0;
+    padding: 8px 14px;
+    font-size: 20px;
+    font-weight: 900;
+    color: #f8fafc;
+    background: linear-gradient(90deg, rgba(37,99,235,0.45), rgba(37,99,235,0.05));
+    border-left: 5px solid #60a5fa;
+    border-radius: 3px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+  }
+  .human-rack-header:first-child { margin-top: 4px; }
   .human-server {
-    margin-bottom: 18px;
+    margin-bottom: 14px;
+    margin-left: 14px;
     padding: 12px 14px;
     background: rgba(15,23,42,0.55);
     border-left: 3px solid #2563eb;
     border-radius: 4px;
   }
-  .human-server-model {
-    font-size: 22px;
-    font-weight: 800;
+  .human-server-ip {
+    font-size: 24px;
+    font-weight: 900;
     color: #f8fafc;
-    letter-spacing: 0.2px;
+    letter-spacing: 0.4px;
+    line-height: 1.15;
   }
-  .human-server-meta {
+  .human-server-model-sub {
     font-size: 15px;
+    font-weight: 700;
+    color: #cbd5e1;
+    margin-top: 4px;
+  }
+  .human-server-tag-sub {
+    font-size: 13px;
     color: #94a3b8;
-    margin-top: 3px;
+    margin-top: 1px;
   }
   .human-server-summary {
     margin-top: 12px;
@@ -3125,14 +3160,16 @@ def ui():
         document.getElementById("reportsError").style.display = "block";
         return;
       }
-      renderReportTable(data.columns, data.rows);
+      renderReportTable(data.columns, data.rows, data.rack_assignments || {}, data.rack_order || []);
     } catch(e) {
       document.getElementById("reportsLoading").style.display = "none";
       document.getElementById("reportsSelector").style.display = "block";
     }
   }
 
-  function renderReportTable(columns, rows) {
+  function renderReportTable(columns, rows, rackAssignments, rackOrder) {
+    rackAssignments = rackAssignments || {};
+    rackOrder = rackOrder || [];
     const head = document.getElementById("reportsHead");
     const body = document.getElementById("reportsBody");
     head.innerHTML = "";
@@ -3164,7 +3201,7 @@ def ui():
     // Build a human-readable view if a recipe exists for this report
     const humanContainer = document.getElementById("reportsHumanView");
     humanContainer.innerHTML = "";
-    const humanContent = buildHumanReport(columns, rows);
+    const humanContent = buildHumanReport(columns, rows, rackAssignments, rackOrder);
     const toggleBtn = document.getElementById("reportsToggleViewBtn");
     if (humanContent) {
       humanContainer.appendChild(humanContent);
@@ -3182,10 +3219,10 @@ def ui():
   // document. To add support for a new report, write a builder
   // function and add it to the dispatch in buildHumanReport().
 
-  function buildHumanReport(columns, rows) {
+  function buildHumanReport(columns, rows, rackAssignments, rackOrder) {
     // GPU Details report — detected by GPU-specific column names
     if (columns.indexOf("GPU Name") >= 0 && columns.indexOf("GPU FQDD") >= 0) {
-      return buildGpuDetailsHumanReport(columns, rows);
+      return buildGpuDetailsHumanReport(columns, rows, rackAssignments || {}, rackOrder || []);
     }
     return null;
   }
@@ -3223,7 +3260,7 @@ def ui():
     return true;
   }
 
-  function buildGpuDetailsHumanReport(columns, rows) {
+  function buildGpuDetailsHumanReport(columns, rows, rackAssignments, rackOrder) {
     var COLS = colIndexMap(columns, [
       "Server Name", "Server Model", "Server Identifier",
       "GPU Name", "GPU FQDD", "GPU Firmware Version", "GPU Health",
@@ -3237,18 +3274,18 @@ def ui():
     }
 
     // Group rows by Server Name (iDRAC IP)
-    var grouped = new Map();
+    var byIp = new Map();
     rows.forEach(function(row) {
       var ip = cell(row, "Server Name");
       if (!ip) return;
-      if (!grouped.has(ip)) grouped.set(ip, []);
-      grouped.get(ip).push(row);
+      if (!byIp.has(ip)) byIp.set(ip, []);
+      byIp.get(ip).push(row);
     });
 
     var container = document.createElement("div");
     container.className = "human-report";
 
-    if (grouped.size === 0) {
+    if (byIp.size === 0) {
       var empty = document.createElement("div");
       empty.className = "human-empty";
       empty.textContent = "No GPU data for any configured server.";
@@ -3256,26 +3293,65 @@ def ui():
       return container;
     }
 
-    // Sort servers by IP for stable display
-    var ips = Array.from(grouped.keys()).sort();
-    ips.forEach(function(ip) {
-      var serverRows = grouped.get(ip);
-      var first = serverRows[0];
-      var model = cell(first, "Server Model") || "Unknown Model";
-      var tag = cell(first, "Server Identifier") || "—";
+    // Group IPs by rack label so the report renders one rack section
+    // at a time. Use the rack_order from the backend so racks appear
+    // in the same order as they do on the dashboard. Any IPs without
+    // a known rack assignment fall into a trailing "Unassigned" group.
+    var rackBuckets = new Map();
+    function addToRack(label, ip) {
+      if (!rackBuckets.has(label)) rackBuckets.set(label, []);
+      rackBuckets.get(label).push(ip);
+    }
+    Array.from(byIp.keys()).forEach(function(ip) {
+      var label = (rackAssignments && rackAssignments[ip]) || "Unassigned";
+      addToRack(label, ip);
+    });
 
-      var serverDiv = document.createElement("div");
-      serverDiv.className = "human-server";
+    // Build the final ordered list of rack labels: backend order first,
+    // then any extra labels (e.g. "Unassigned") that weren't in rackOrder.
+    var orderedLabels = [];
+    rackOrder.forEach(function(lbl) {
+      if (rackBuckets.has(lbl)) orderedLabels.push(lbl);
+    });
+    rackBuckets.forEach(function(_v, lbl) {
+      if (orderedLabels.indexOf(lbl) < 0) orderedLabels.push(lbl);
+    });
 
-      var modelLine = document.createElement("div");
-      modelLine.className = "human-server-model";
-      modelLine.textContent = model;
-      serverDiv.appendChild(modelLine);
+    orderedLabels.forEach(function(rackLabel) {
+      var ipsInRack = rackBuckets.get(rackLabel) || [];
+      ipsInRack.sort();
 
-      var metaLine = document.createElement("div");
-      metaLine.className = "human-server-meta";
-      metaLine.textContent = "Service Tag: " + tag + "    \u00B7    iDRAC: " + ip;
-      serverDiv.appendChild(metaLine);
+      // Rack section header
+      var rackHeader = document.createElement("div");
+      rackHeader.className = "human-rack-header";
+      rackHeader.textContent = rackLabel;
+      container.appendChild(rackHeader);
+
+      ipsInRack.forEach(function(ip) {
+        var serverRows = byIp.get(ip);
+        if (!serverRows || !serverRows.length) return;
+        var first = serverRows[0];
+        var model = cell(first, "Server Model") || "Unknown Model";
+        var tag = cell(first, "Server Identifier") || "\u2014";
+
+        var serverDiv = document.createElement("div");
+        serverDiv.className = "human-server";
+
+        // IP is now the primary heading, model second, service tag third
+        var ipLine = document.createElement("div");
+        ipLine.className = "human-server-ip";
+        ipLine.textContent = ip;
+        serverDiv.appendChild(ipLine);
+
+        var modelLine = document.createElement("div");
+        modelLine.className = "human-server-model-sub";
+        modelLine.textContent = model;
+        serverDiv.appendChild(modelLine);
+
+        var tagLine = document.createElement("div");
+        tagLine.className = "human-server-tag-sub";
+        tagLine.textContent = "Service Tag: " + tag;
+        serverDiv.appendChild(tagLine);
 
       // Aggregate summary
       var firmwares = new Set();
@@ -3356,7 +3432,8 @@ def ui():
       });
       serverDiv.appendChild(ul);
 
-      container.appendChild(serverDiv);
+        container.appendChild(serverDiv);
+      });
     });
 
     return container;
@@ -3413,9 +3490,12 @@ def ui():
     var head = "<!DOCTYPE html><html><head><meta charset='utf-8'><title>" + name + "</title>";
     var css = "body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;color:#0f172a;background:#fff;padding:24px;}"
       + "h1{font-size:24px;margin:0 0 18px 0;}"
-      + ".human-server{margin-bottom:20px;padding:14px 16px;background:#f8fafc;border-left:3px solid #1e40af;border-radius:4px;page-break-inside:avoid;}"
-      + ".human-server-model{font-size:20px;font-weight:800;color:#0f172a;}"
-      + ".human-server-meta{font-size:14px;color:#475569;margin-top:3px;}"
+      + ".human-rack-header{margin:18px 0 10px 0;padding:6px 12px;font-size:18px;font-weight:900;color:#0f172a;background:#dbeafe;border-left:5px solid #1d4ed8;border-radius:3px;text-transform:uppercase;letter-spacing:1px;page-break-after:avoid;}"
+      + ".human-rack-header:first-child{margin-top:0;}"
+      + ".human-server{margin-bottom:14px;margin-left:14px;padding:12px 14px;background:#f8fafc;border-left:3px solid #1e40af;border-radius:4px;page-break-inside:avoid;}"
+      + ".human-server-ip{font-size:22px;font-weight:900;color:#0f172a;line-height:1.15;}"
+      + ".human-server-model-sub{font-size:14px;font-weight:700;color:#1e293b;margin-top:4px;}"
+      + ".human-server-tag-sub{font-size:12px;color:#475569;margin-top:1px;}"
       + ".human-server-summary{margin-top:10px;padding:8px 0;font-size:15px;font-weight:700;color:#1e293b;border-bottom:1px solid #e2e8f0;}"
       + ".human-server-summary.attention{color:#b91c1c;}"
       + ".human-server-summary.healthy{color:#166534;}"
