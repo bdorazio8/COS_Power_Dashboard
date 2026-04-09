@@ -1703,26 +1703,56 @@ def ui():
   .human-server-summary.healthy   { color: #4ade80; }
   .human-gpu-list {
     list-style: none;
-    margin: 8px 0 0 0;
+    margin: 10px 0 0 0;
     padding: 0;
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 5px 10px;
   }
   .human-gpu-list li {
-    padding: 4px 0 4px 18px;
-    font-size: 13px;
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    padding: 5px 8px;
+    font-size: 12px;
+    line-height: 1.3;
     color: #cbd5e1;
-    position: relative;
+    background: rgba(255,255,255,0.04);
+    border-left: 2px solid #475569;
+    border-radius: 2px;
+    overflow: hidden;
   }
-  .human-gpu-list li::before {
-    content: "•";
-    position: absolute;
-    left: 4px;
-    color: #64748b;
+  .human-gpu-list li .slot-num {
     font-weight: 900;
+    color: #f8fafc;
+    font-size: 13px;
+    flex: 0 0 auto;
+    min-width: 1.5em;
+  }
+  .human-gpu-list li .serial {
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 11px;
+    color: #94a3b8;
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .human-gpu-list li .status {
+    font-weight: 800;
+    font-size: 11px;
+    color: #4ade80;
+    flex: 0 0 auto;
   }
   .human-gpu-list li.abnormal {
-    color: #f87171;
+    background: rgba(239,68,68,0.12);
+    border-left-color: #ef4444;
+    color: #fecaca;
   }
-  .human-gpu-list li.abnormal::before { color: #f87171; }
+  .human-gpu-list li.abnormal .slot-num { color: #fecaca; }
+  .human-gpu-list li.abnormal .serial { color: #fca5a5; }
+  .human-gpu-list li.abnormal .status { color: #f87171; }
   .human-empty {
     padding: 24px;
     text-align: center;
@@ -3285,8 +3315,8 @@ def ui():
       ul.className = "human-gpu-list";
       sortedRows.forEach(function(r) {
         var slot = extractSlotNumber(cell(r, "GPU FQDD"));
-        var slotLabel = slot ? ("Slot " + slot) : (cell(r, "GPU FQDD") || "GPU");
-        var serial = cell(r, "GPU Serial Number") || "—";
+        var slotLabel = slot || (cell(r, "GPU FQDD") || "?");
+        var serial = cell(r, "GPU Serial Number") || "\u2014";
         var li = document.createElement("li");
 
         // Check for any abnormal states and surface them
@@ -3294,25 +3324,34 @@ def ui():
         var checks = [
           ["GPU Health", "Health"],
           ["GPU Status", "Status"],
-          ["GPU Power Supply Status", "Power Supply"],
-          ["GPU Thermal Alert State", "Thermal Alert"],
-          ["GPU Power Brake State", "Power Brake"]
+          ["GPU Power Supply Status", "PSU"],
+          ["GPU Thermal Alert State", "Therm"],
+          ["GPU Power Brake State", "Brake"]
         ];
         checks.forEach(function(pair) {
           var v = cell(r, pair[0]);
           if (v && !isHealthyState(pair[0], v)) {
-            problems.push(pair[1] + ": " + v);
+            problems.push(pair[1] + ":" + v);
           }
         });
 
-        var line = slotLabel + "    \u00B7    Serial " + serial;
+        var slotSpan = document.createElement("span");
+        slotSpan.className = "slot-num";
+        slotSpan.textContent = slotLabel;
+        var serialSpan = document.createElement("span");
+        serialSpan.className = "serial";
+        serialSpan.textContent = serial;
+        var statusSpan = document.createElement("span");
+        statusSpan.className = "status";
         if (problems.length > 0) {
-          line += "    \u00B7    " + problems.join("    \u00B7    ");
+          statusSpan.textContent = problems.join(" ");
           li.classList.add("abnormal");
         } else {
-          line += "    \u00B7    OK";
+          statusSpan.textContent = "OK";
         }
-        li.textContent = line;
+        li.appendChild(slotSpan);
+        li.appendChild(serialSpan);
+        li.appendChild(statusSpan);
         ul.appendChild(li);
       });
       serverDiv.appendChild(ul);
@@ -3380,12 +3419,16 @@ def ui():
       + ".human-server-summary{margin-top:8px;padding:6px 0;font-size:13px;font-weight:700;color:#1e293b;border-bottom:1px solid #e2e8f0;}"
       + ".human-server-summary.attention{color:#b91c1c;}"
       + ".human-server-summary.healthy{color:#166534;}"
-      + ".human-gpu-list{list-style:none;margin:8px 0 0 0;padding:0;}"
-      + ".human-gpu-list li{padding:3px 0 3px 16px;font-size:12px;color:#1e293b;position:relative;}"
-      + ".human-gpu-list li::before{content:'\u2022';position:absolute;left:2px;color:#64748b;}"
-      + ".human-gpu-list li.abnormal{color:#b91c1c;}"
-      + ".human-gpu-list li.abnormal::before{color:#b91c1c;}"
-      + "@media print{body{padding:12px;} .human-server{box-shadow:none;}}";
+      + ".human-gpu-list{list-style:none;margin:8px 0 0 0;padding:0;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:4px 8px;}"
+      + ".human-gpu-list li{display:flex;align-items:baseline;gap:5px;padding:4px 6px;font-size:11px;background:#eef2f7;border-left:2px solid #cbd5e1;border-radius:2px;color:#1e293b;overflow:hidden;}"
+      + ".human-gpu-list li .slot-num{font-weight:900;font-size:12px;color:#0f172a;min-width:1.5em;}"
+      + ".human-gpu-list li .serial{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:10px;color:#475569;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}"
+      + ".human-gpu-list li .status{font-weight:800;font-size:10px;color:#166534;}"
+      + ".human-gpu-list li.abnormal{background:#fee2e2;border-left-color:#dc2626;color:#7f1d1d;}"
+      + ".human-gpu-list li.abnormal .slot-num{color:#7f1d1d;}"
+      + ".human-gpu-list li.abnormal .serial{color:#991b1b;}"
+      + ".human-gpu-list li.abnormal .status{color:#b91c1c;}"
+      + "@media print{body{padding:12px;} .human-server{box-shadow:none;} .human-gpu-list{grid-template-columns:repeat(4,minmax(0,1fr));}}";
     head += "<style>" + css + "</style></head><body>";
     head += "<h1>" + name + "</h1>";
     doc.write(head);
