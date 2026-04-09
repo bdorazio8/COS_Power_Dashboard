@@ -957,12 +957,18 @@ def api_run_report(data: dict):
     token = _ome_session()
     if not token:
         return {"ok": False, "error": "OME not configured or auth failed"}
-    # Get all configured server iDRAC IPs for filtering
+    # Collect configured server iDRAC IPs from racks (Edit Rack dialog)
     all_servers = get_all_servers()
     configured_ips = set()
     for rack_servers in all_servers.values():
         for srv in rack_servers:
-            configured_ips.add(srv["idrac_ip"].strip())
+            ip = (srv.get("idrac_ip") or "").strip()
+            if ip:
+                configured_ips.add(ip)
+    if not configured_ips:
+        return {"ok": False, "error": "No servers configured in dashboard.\nAdd servers to racks first."}
+    # Lowercase for case-insensitive matching against report cells
+    configured_ips_lc = {ip.lower() for ip in configured_ips}
     # Run the report
     _ome_post(token, "/ReportService/Actions/ReportService.RunReport", {"ReportDefId": int(report_id)})
     # Fetch results
@@ -974,18 +980,34 @@ def api_run_report(data: dict):
     columns = []
     if report_def:
         columns = [c["Name"] for c in report_def.get("ColumnNames", [])]
-    # Filter rows to only servers configured in our dashboard
-    # Server IP/Name is typically the first column in OME reports
+    # Filter rows: include any row where ANY column value matches a
+    # configured iDRAC IP. Different OME reports place the IP in
+    # different columns (device name, service tag, IP, etc.), so we
+    # scan all cells rather than assuming a fixed column position.
     rows = []
-    for row in results.get("value", []):
+    raw_rows = results.get("value", [])
+    for row in raw_rows:
         values = row.get("Values", [])
         if not values:
             continue
-        server_id = values[0].strip() if values[0] else ""
-        if configured_ips and server_id in configured_ips:
-            rows.append(values)
-    if not configured_ips:
-        return {"ok": False, "error": "No servers configured in dashboard.\nAdd servers to racks first."}
+        for cell in values:
+            if cell is None:
+                continue
+            cell_norm = str(cell).strip().lower()
+            if not cell_norm:
+                continue
+            if cell_norm in configured_ips_lc:
+                rows.append(values)
+                break
+    if not rows and raw_rows:
+        # Filtering removed everything — log a sample so we can see
+        # what OME is actually returning vs what we tried to match.
+        sample = raw_rows[0].get("Values", []) if raw_rows else []
+        logger.warning(
+            "Report %s returned %d rows but none matched configured iDRAC IPs. "
+            "Configured: %s. Sample row cells: %s",
+            report_id, len(raw_rows), sorted(configured_ips), sample,
+        )
     return {"ok": True, "columns": columns, "rows": rows}
 
 # ----------------------------
