@@ -872,6 +872,38 @@ def _ome_get(token: str, path: str) -> Optional[dict]:
         logger.warning("OME GET %s failed: %s", path, e)
         return None
 
+def _ome_get_all_pages(token: str, path: str) -> List[dict]:
+    """GET an OME OData endpoint and follow @odata.nextLink to collect all rows.
+
+    OME's report row endpoints paginate at 100 rows by default. Without
+    walking nextLink we silently miss every server beyond the first page.
+    """
+    all_rows: List[dict] = []
+    next_path: Optional[str] = path
+    safety = 0
+    while next_path and safety < 200:
+        safety += 1
+        data = _ome_get(token, next_path)
+        if not data:
+            break
+        all_rows.extend(data.get("value", []) or [])
+        next_link = data.get("@odata.nextLink") or ""
+        if not next_link:
+            break
+        # @odata.nextLink is typically returned as "/api/<path>?$skip=N".
+        # _ome_get prepends "/api" itself, so strip it here.
+        if next_link.startswith("/api"):
+            next_path = next_link[4:]
+        elif next_link.startswith("http"):
+            # Absolute URL — extract everything after "/api"
+            idx = next_link.find("/api/")
+            next_path = next_link[idx + 4:] if idx >= 0 else None
+        else:
+            next_path = next_link
+    if safety >= 200:
+        logger.warning("OME pagination safety cap hit at 200 pages for %s", path)
+    return all_rows
+
 def _ome_post(token: str, path: str, body: dict):
     """POST request to OME API with auth token."""
     host = get_setting("ome_host", "")
@@ -971,9 +1003,9 @@ def api_run_report(data: dict):
     configured_ips_lc = {ip.lower() for ip in configured_ips}
     # Run the report
     _ome_post(token, "/ReportService/Actions/ReportService.RunReport", {"ReportDefId": int(report_id)})
-    # Fetch results
-    results = _ome_get(token, f"/ReportService/ReportDefs({report_id})/ReportResults/ResultRows")
-    if not results:
+    # Fetch ALL pages of result rows (OME paginates at 100 by default)
+    raw_rows = _ome_get_all_pages(token, f"/ReportService/ReportDefs({report_id})/ReportResults/ResultRows")
+    if not raw_rows:
         return {"ok": False, "error": "Failed to fetch report results"}
     # Get column names
     report_def = _ome_get(token, f"/ReportService/ReportDefs({report_id})")
@@ -985,7 +1017,6 @@ def api_run_report(data: dict):
     # different columns (device name, service tag, IP, etc.), so we
     # scan all cells rather than assuming a fixed column position.
     rows = []
-    raw_rows = results.get("value", [])
     for row in raw_rows:
         values = row.get("Values", [])
         if not values:
@@ -999,6 +1030,7 @@ def api_run_report(data: dict):
             if cell_norm in configured_ips_lc:
                 rows.append(values)
                 break
+    logger.info("Report %s: fetched %d total rows, %d matched configured iDRAC IPs", report_id, len(raw_rows), len(rows))
     if not rows and raw_rows:
         # Filtering removed everything — log a sample so we can see
         # what OME is actually returning vs what we tried to match.
