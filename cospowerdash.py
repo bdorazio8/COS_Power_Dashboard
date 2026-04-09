@@ -1357,7 +1357,7 @@ def ui():
     min-height: 0;
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: 0;
     overflow: hidden;
   }
   .pdu-load-row-label {
@@ -1367,10 +1367,10 @@ def ui():
     color: rgba(226,232,240,0.92);
     white-space: nowrap;
     letter-spacing: 0.3px;
-    text-align: right;
+    text-align: center;
     min-width: 3.4em;
   }
-  .pdu-load-section.split .pdu-load-row-label { font-size: clamp(11px, 3.6cqi, 30px); min-width: 1.4em; }
+  .pdu-load-section.split .pdu-load-row-label { font-size: clamp(11px, 3.6cqi, 30px); min-width: 2.4em; }
   .pdu-load-track {
     flex: 1 1 0;
     min-width: 0;
