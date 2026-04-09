@@ -49,11 +49,11 @@ REDFISH_TIMEOUT = 5
 # Logging
 # ----------------------------
 
-# Standard operational logger -> upsdash.log + stderr
-logger = logging.getLogger("upsdash")
+# Standard operational logger -> powerdash.log + stderr
+logger = logging.getLogger("powerdash")
 logger.setLevel(logging.DEBUG)
 
-_file_handler = RotatingFileHandler("upsdash.log", maxBytes=1_000_000, backupCount=3)
+_file_handler = RotatingFileHandler("powerdash.log", maxBytes=1_000_000, backupCount=3)
 _file_handler.setLevel(logging.INFO)
 _file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
 logger.addHandler(_file_handler)

@@ -24,7 +24,7 @@ Everything lives in `cospowerdash.py` — a single-file FastAPI application with
 
 ### Key layers (top to bottom in the file):
 
-- **Database** — SQLite (`upsdash.db`), two tables: `racks` (UPS devices) and `settings` (key-value config). Schema migrations are handled inline in `init_db()`.
+- **Database** — SQLite (`powerdash.db`), two tables: `racks` (UPS devices) and `settings` (key-value config). Schema migrations are handled inline in `init_db()`.
 - **SNMP helpers** — Shell out to `snmpget` (SNMPv2c, community `COS65`) for load percentage (`upsOutputLoad`) and APC bypass state. `ping` is used for reachability checks.
 - **Poll loop** — `asyncio` background task runs every 2 seconds, polls all racks, updates `latest_status` dict, and broadcasts JSON snapshots to all connected WebSocket clients.
 - **REST API** — `/api/racks` (add), `/api/delete`, `/api/check` (SNMP connectivity test), `/api/order` (drag-and-drop reorder), `/api/settings/title`.
