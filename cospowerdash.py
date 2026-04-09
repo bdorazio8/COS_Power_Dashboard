@@ -2568,7 +2568,7 @@ def ui():
   <!-- Reports Modal -->
   <div class="modal" id="reportsModal">
     <div id="reportsContent" class="modal-content" style="max-height:85vh;display:flex;flex-direction:column">
-      <h3>Reports</h3>
+      <h3 id="reportsTitle">Reports</h3>
       <div id="reportsChooser" style="display:none">
         <div style="font-size:13px;color:rgba(148,163,184,0.85);margin-bottom:14px">Choose a report type:</div>
         <div class="reportCard" onclick="showGraphFlow()">
@@ -2632,7 +2632,6 @@ def ui():
         </div>
       </div>
       <div id="graphReportForm" style="display:none">
-        <div style="margin-bottom:8px"><span style="color:#cbd5e1;font-weight:600">Lab Overview Report</span></div>
         <div style="font-size:12px;color:rgba(148,163,184,0.85);margin-bottom:10px">Generates a PDF combining Grafana panel renders and Prometheus charts for the selected window.</div>
         <div style="margin-bottom:8px"><span style="color:#cbd5e1;font-weight:600">Time Range:</span></div>
         <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:10px">
@@ -3880,6 +3879,7 @@ def ui():
 
   function showReportsChooser() {
     hideAllReportPanels();
+    document.getElementById("reportsTitle").textContent = "Select Report Type";
     document.getElementById("reportsChooser").style.display = "block";
   }
 
@@ -3888,6 +3888,7 @@ def ui():
   // not-configured panel (with a Back button to return to the chooser).
   async function showOmeFlow() {
     hideAllReportPanels();
+    document.getElementById("reportsTitle").textContent = "OME Reports";
     document.getElementById("reportsLoading").style.display = "block";
     try {
       const res = await fetch("/api/reports/available");
@@ -3912,9 +3913,10 @@ def ui():
     }
   }
 
-  // Graph Report flow: hide everything else and reuse the existing form opener.
+  // Lab Overview Report flow: hide everything else and reuse the existing form opener.
   function showGraphFlow() {
     hideAllReportPanels();
+    document.getElementById("reportsTitle").textContent = "Lab Overview Report";
     openGraphReportForm();
   }
 
