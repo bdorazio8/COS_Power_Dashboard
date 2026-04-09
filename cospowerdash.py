@@ -3781,6 +3781,7 @@ def ui():
     document.getElementById("reportsSelector").style.display = "none";
     document.getElementById("reportsResults").style.display = "none";
     document.getElementById("reportsActions").style.display = "none";
+    document.getElementById("graphReportForm").style.display = "none";
     document.getElementById("reportsLoading").style.display = "block";
 
     try {
@@ -3808,6 +3809,10 @@ def ui():
 
   function closeReports() {
     document.getElementById("reportsModal").style.display = "none";
+    // Reset internal panels so the next openReports() starts in a clean state
+    document.getElementById("graphReportForm").style.display = "none";
+    document.getElementById("reportsResults").style.display = "none";
+    document.getElementById("reportsActions").style.display = "none";
   }
 
   async function runReport() {
