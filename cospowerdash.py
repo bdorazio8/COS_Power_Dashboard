@@ -457,6 +457,43 @@ def _parse_float(text: str) -> Optional[float]:
             return float(val) if val is not None else None
     return None
 
+_pdu_rated_a_cache: Dict[str, float] = {}
+
+# Inlet sensor configuration table (PDU2-MIB) — used to discover the PDU's
+# own configured upperCritical threshold for rmsCurrent. The exact column
+# number for upperCritical varies between MIB versions, so we try several
+# plausible columns and accept the first one that returns a sane value.
+# Format: 1.3.6.1.4.1.13742.6.3.3.4.1.{column}.1.1.1
+#   column = upperCritical column candidate
+#   .1.1.1 = role(inlet=1).inletId(1).sensorType(rmsCurrent=1)
+_RATED_AMPS_OID_CANDIDATES = [
+    "1.3.6.1.4.1.13742.6.3.3.4.1.31.1.1.1",
+    "1.3.6.1.4.1.13742.6.3.3.4.1.6.1.1.1",
+    "1.3.6.1.4.1.13742.6.3.3.4.1.5.1.1.1",
+]
+RATED_AMPS_DEFAULT = 30.0  # Hardcoded fallback when auto-detection fails
+
+def get_pdu_rated_amps(ip: str) -> float:
+    """Discover the PDU's rated/upperCritical inlet current in amps.
+
+    Tries candidate OIDs from the PDU2-MIB inlet sensor configuration table,
+    accepts the first plausible result (5–100 A), and caches it. Falls back
+    to RATED_AMPS_DEFAULT if nothing usable is found.
+    """
+    if ip in _pdu_rated_a_cache:
+        return _pdu_rated_a_cache[ip]
+    for oid in _RATED_AMPS_OID_CANDIDATES:
+        raw = snmp_get(ip, oid)
+        val = _parse_int(raw) if raw else None
+        if val is not None and 5000 <= val <= 100000:  # 5–100 A in milliamps
+            amps = round(val / 1000.0, 1)
+            _pdu_rated_a_cache[ip] = amps
+            logger.info("PDU %s rated amps detected: %.1f A (via %s)", ip, amps, oid)
+            return amps
+    _pdu_rated_a_cache[ip] = RATED_AMPS_DEFAULT
+    logger.warning("PDU %s rated amps auto-detect failed, defaulting to %.0f A", ip, RATED_AMPS_DEFAULT)
+    return RATED_AMPS_DEFAULT
+
 def detect_pdu_type(ip: str) -> Optional[str]:
     """Auto-detect PDU type by querying model string OID. Returns 'servertech', 'raritan', or None."""
     raw = snmp_get(ip, OID_PDU_MODEL)
@@ -565,7 +602,7 @@ async def poll_loop():
                     if pdu_ip not in pdu_ping_cache:
                         pdu_ping_cache[pdu_ip] = ping_ok(pdu_ip)
                     if not pdu_ping_cache[pdu_ip]:
-                        phases_all.append({"pdu_ip": pdu_ip, "pdu_key": pdu_key, "reachable": False, "total_w": None, "total_a": None, "phases": [
+                        phases_all.append({"pdu_ip": pdu_ip, "pdu_key": pdu_key, "reachable": False, "total_w": None, "total_a": None, "rated_a": _pdu_rated_a_cache.get(pdu_ip, RATED_AMPS_DEFAULT), "phases": [
                             {"label": "Phase " + p, "current_a": 0, "power_w": 0, "reachable": False} for p in ("A", "B", "C")
                         ]})
                         continue
@@ -607,7 +644,8 @@ async def poll_loop():
                     else:
                         phases = [{"label": "Phase " + p, "current_a": 0, "power_w": 0, "reachable": False} for p in ("A", "B", "C")]
 
-                    phases_all.append({"pdu_ip": pdu_ip, "pdu_key": pdu_key, "reachable": True, "type": pdu_type, "phases": phases, "total_w": total_w, "total_a": total_a})
+                    rated_a = get_pdu_rated_amps(pdu_ip)
+                    phases_all.append({"pdu_ip": pdu_ip, "pdu_key": pdu_key, "reachable": True, "type": pdu_type, "phases": phases, "total_w": total_w, "total_a": total_a, "rated_a": rated_a})
 
                 latest_pdu_phases[rid] = phases_all
 
@@ -1262,12 +1300,73 @@ def ui():
     flex-direction: column;
     overflow: hidden;
   }
-  .crt-block-total {
-    flex: 0.5 1 0;
+  .pdu-load-section {
+    flex: 0.7 1 0;
+    min-height: 0;
     margin-top: 4px;
+    padding-top: 4px;
     border-top: 2px solid rgba(167,139,250,0.55);
-    background: rgba(15,23,42,0.35);
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    overflow: hidden;
   }
+  .pdu-load-section.split { gap: 1px; }
+  .pdu-load-row {
+    flex: 1 1 0;
+    min-height: 0;
+    display: flex;
+    align-items: stretch;
+    gap: 4px;
+    overflow: hidden;
+  }
+  .pdu-load-row-label {
+    flex: 0 0 auto;
+    align-self: center;
+    font-weight: 900;
+    font-size: clamp(8px, 2.6cqi, 22px);
+    color: rgba(148,163,184,0.9);
+    width: 1.2em;
+    text-align: center;
+  }
+  .pdu-load-bar {
+    position: relative;
+    flex: 1 1 0;
+    min-width: 0;
+    background: rgba(15,23,42,0.7);
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 3px;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .pdu-load-bar-single {
+    flex: 1 1 0;
+    height: 100%;
+  }
+  .pdu-load-bar-fill {
+    position: absolute;
+    left: 0; top: 0; bottom: 0;
+    width: 0%;
+    transition: width 0.3s ease;
+    z-index: 0;
+  }
+  .pdu-load-bar-fill.green { background: rgba(34,197,94,0.55); }
+  .pdu-load-bar-fill.amber { background: rgba(245,158,11,0.6); }
+  .pdu-load-bar-fill.red   { background: rgba(239,68,68,0.6); }
+  .pdu-load-bar-text {
+    position: relative;
+    z-index: 1;
+    font-weight: 900;
+    color: white;
+    text-shadow: 0 1px 2px rgba(0,0,0,0.7);
+    white-space: nowrap;
+    font-size: clamp(9px, 3.2cqi, 28px);
+    padding: 0 6px;
+  }
+  .pdu-load-section.split .pdu-load-bar-text { font-size: clamp(7px, 2.4cqi, 18px); }
+  .pdu-load-bar-text.offline { color: rgba(255,255,255,0.3); }
   .crt-label {
     font-weight: 900;
     font-size: 10px;
@@ -1620,6 +1719,11 @@ def ui():
         <label style="cursor:pointer;white-space:nowrap"><input type="radio" name="viewportStyle" value="racks" id="vpRacks" checked /> Racks</label>
         <label style="cursor:pointer;white-space:nowrap"><input type="radio" name="viewportStyle" value="fill" id="vpFill" /> Fill</label>
       </div>
+      <div style="margin-top:12px;display:flex;align-items:center;gap:12px">
+        <span style="color:#cbd5e1;font-weight:600;white-space:nowrap">PDU Load Style:</span>
+        <label style="cursor:pointer;white-space:nowrap"><input type="radio" name="pduLoadStyle" value="single" id="loadSingle" checked /> Single Bar</label>
+        <label style="cursor:pointer;white-space:nowrap"><input type="radio" name="pduLoadStyle" value="split" id="loadSplit" /> Per-Phase Bars</label>
+      </div>
       <div style="margin-top:16px;border-top:1px solid rgba(255,255,255,0.08);padding-top:12px">
         <div style="margin-bottom:4px"><span style="color:#cbd5e1;font-weight:600">iDRAC Credentials:</span></div>
         <div style="display:flex;gap:8px;margin-bottom:8px">
@@ -1696,6 +1800,7 @@ def ui():
   let draggedId = null;
   let pendingOrderSave = false;
   let viewportStyle = "racks";
+  let pduLoadStyle = "single"; // 'single' = one bar, 'split' = three per-phase bars
 
   ws.onmessage = (event) => {
     let incoming = [];
@@ -1853,18 +1958,11 @@ def ui():
           pduBanner.textContent = pdu.pdu_ip ? ((pdu.type === "servertech" ? "Server Tech" : pdu.type === "raritan" ? "Raritan" : "PDU") + ": " + pdu.pdu_ip) : "\u00A0";
           serverArea.appendChild(pduBanner);
 
-          // 3 phase boxes + total box (4 evenly-sized blocks)
+          // 3 phase boxes
           const blocks = (pdu.phases || []).slice();
-          blocks.push({
-            label: "Total",
-            current_a: pdu.total_a,
-            power_w: pdu.total_w,
-            reachable: pdu.reachable !== false && pdu.total_a !== null && pdu.total_a !== undefined,
-            isTotal: true
-          });
           blocks.forEach(phase => {
             let block = document.createElement("div");
-            block.className = "crt-block" + (phase.isTotal ? " crt-block-total" : "");
+            block.className = "crt-block";
 
             let lbl = document.createElement("div");
             lbl.className = "crt-label";
@@ -1916,6 +2014,9 @@ def ui():
             block.appendChild(body);
             serverArea.appendChild(block);
           });
+
+          // Load section — replaces the old Total block, two render styles
+          serverArea.appendChild(buildLoadSection(pdu));
         });
       } else {
         let msg = document.createElement("div");
@@ -1935,6 +2036,89 @@ def ui():
       computeRackSize(racks.length);
       autoSizeMetrics();
     });
+  }
+
+  function loadColorClass(pct) {
+    if (pct >= 85) return "red";
+    if (pct >= 70) return "amber";
+    return "green";
+  }
+
+  function buildLoadSection(pdu) {
+    const section = document.createElement("div");
+    section.className = "pdu-load-section";
+
+    const ratedA = (pdu.rated_a && pdu.rated_a > 0) ? pdu.rated_a : 30;
+    const reachable = pdu.reachable !== false && pdu.total_a !== null && pdu.total_a !== undefined;
+    const phases = pdu.phases || [];
+
+    if (pduLoadStyle === "split") {
+      // Style 2 — three thin per-phase load bars stacked
+      section.classList.add("split");
+      phases.forEach(phase => {
+        const row = document.createElement("div");
+        row.className = "pdu-load-row";
+
+        const label = document.createElement("div");
+        label.className = "pdu-load-row-label";
+        label.textContent = (phase.label || "").replace("Phase ", "");
+        row.appendChild(label);
+
+        const bar = document.createElement("div");
+        bar.className = "pdu-load-bar";
+        const fill = document.createElement("div");
+        fill.className = "pdu-load-bar-fill";
+        const text = document.createElement("div");
+        text.className = "pdu-load-bar-text";
+
+        if (phase.reachable && ratedA > 0) {
+          const pct = Math.min(100, (phase.current_a / ratedA) * 100);
+          fill.style.width = pct.toFixed(1) + "%";
+          fill.classList.add(loadColorClass(pct));
+          text.textContent = pct.toFixed(0) + "%  " + phase.current_a.toFixed(2) + " / " + ratedA.toFixed(0) + " A";
+        } else {
+          fill.style.width = "0%";
+          text.textContent = "--";
+          text.classList.add("offline");
+        }
+        bar.appendChild(fill);
+        bar.appendChild(text);
+        row.appendChild(bar);
+        section.appendChild(row);
+      });
+    } else {
+      // Style 1 (default) — single full-width load bar showing max-phase load
+      section.classList.add("single");
+
+      const bar = document.createElement("div");
+      bar.className = "pdu-load-bar pdu-load-bar-single";
+      const fill = document.createElement("div");
+      fill.className = "pdu-load-bar-fill";
+      const text = document.createElement("div");
+      text.className = "pdu-load-bar-text";
+
+      if (reachable && ratedA > 0) {
+        const reachablePhases = phases.filter(p => p.reachable);
+        const maxA = reachablePhases.length
+          ? Math.max(...reachablePhases.map(p => p.current_a || 0))
+          : 0;
+        const pct = Math.min(100, (maxA / ratedA) * 100);
+        fill.style.width = pct.toFixed(1) + "%";
+        fill.classList.add(loadColorClass(pct));
+        const wattsTxt = (pdu.total_w !== null && pdu.total_w !== undefined)
+          ? "  ·  " + Number(pdu.total_w).toFixed(0) + " W"
+          : "";
+        text.textContent = pct.toFixed(0) + "%   " + pdu.total_a.toFixed(2) + " / " + ratedA.toFixed(0) + " A" + wattsTxt;
+      } else {
+        fill.style.width = "0%";
+        text.textContent = "LOAD --";
+        text.classList.add("offline");
+      }
+      bar.appendChild(fill);
+      bar.appendChild(text);
+      section.appendChild(bar);
+    }
+    return section;
   }
 
   function autoSizeMetrics() {
@@ -2121,6 +2305,7 @@ def ui():
       if (d && d.ok && d.title) applyTitle(d.title);
     } catch(e) {}
     viewportStyle = localStorage.getItem("viewportStyle") || "racks";
+    pduLoadStyle = localStorage.getItem("pduLoadStyle") || "single";
     computeRackSize(racksCache.length);
 
     document.getElementById("idracPass").addEventListener("focus", function() {
@@ -2476,6 +2661,7 @@ def ui():
     const current = document.getElementById("dashTitle").innerText || "";
     document.getElementById("titleInput").value = current.trim();
     document.getElementById(viewportStyle === "fill" ? "vpFill" : "vpRacks").checked = true;
+    document.getElementById(pduLoadStyle === "split" ? "loadSplit" : "loadSingle").checked = true;
     document.getElementById("idracTestResult").textContent = "";
     document.getElementById("idracTestIp").value = "";
     try {
@@ -2517,7 +2703,11 @@ def ui():
     const vpVal = document.querySelector('input[name="viewportStyle"]:checked').value;
     localStorage.setItem("viewportStyle", vpVal);
     viewportStyle = vpVal;
+    const loadVal = document.querySelector('input[name="pduLoadStyle"]:checked').value;
+    localStorage.setItem("pduLoadStyle", loadVal);
+    pduLoadStyle = loadVal;
     computeRackSize(racksCache.length);
+    render(racksCache);
     try {
       const titleRes = await fetch("/api/settings/title", {
         method:"POST", headers:{"Content-Type":"application/json"},
