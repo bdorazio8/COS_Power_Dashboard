@@ -1370,7 +1370,7 @@ def ui():
     text-align: right;
     min-width: 3.4em;
   }
-  .pdu-load-section.split .pdu-load-row-label { font-size: clamp(11px, 3.6cqi, 30px); min-width: 4em; }
+  .pdu-load-section.split .pdu-load-row-label { font-size: clamp(11px, 3.6cqi, 30px); min-width: 1.4em; }
   .pdu-load-track {
     flex: 1 1 0;
     min-width: 0;
@@ -2117,7 +2117,7 @@ def ui():
     row.className = "pdu-load-row";
     const label = document.createElement("div");
     label.className = "pdu-load-row-label" + (available ? "" : " offline");
-    label.textContent = available ? (labelText + " " + pct.toFixed(0) + "%") : (labelText + " --");
+    label.textContent = labelText;
     row.appendChild(label);
     row.appendChild(buildSegmentedTrack(pct, available));
     return row;
