@@ -2715,22 +2715,25 @@ def ui():
 
   // ---------------- iDRAC Configuration Dialog ----------------
   async function openIdracDialog() {
-    document.getElementById("idracModal").style.display = "flex";
-    document.getElementById("idracTestResult").textContent = "";
-    document.getElementById("idracTestIp").value = "";
-    document.getElementById("idracUser").value = "";
-    const passEl = document.getElementById("idracPass");
-    passEl.value = "";
-    passEl.dataset.unchanged = "false";
+    // Fetch BEFORE showing the modal to avoid a race where the user
+    // starts typing and the fetch response then overwrites their input.
+    let userVal = "";
+    let hasPassword = false;
     try {
       const ir = await fetch("/api/settings/idrac");
       const id = await ir.json();
       if (id && id.ok) {
-        document.getElementById("idracUser").value = id.username || "";
-        passEl.value = id.has_password ? "********" : "";
-        passEl.dataset.unchanged = id.has_password ? "true" : "false";
+        userVal = id.username || "";
+        hasPassword = !!id.has_password;
       }
     } catch(e) {}
+    document.getElementById("idracUser").value = userVal;
+    const passEl = document.getElementById("idracPass");
+    passEl.value = hasPassword ? "********" : "";
+    passEl.dataset.unchanged = hasPassword ? "true" : "false";
+    document.getElementById("idracTestIp").value = "";
+    document.getElementById("idracTestResult").textContent = "";
+    document.getElementById("idracModal").style.display = "flex";
   }
 
   function closeIdracDialog() { document.getElementById("idracModal").style.display = "none"; }
@@ -2752,23 +2755,27 @@ def ui():
 
   // ---------------- OME Configuration Dialog ----------------
   async function openOmeDialog() {
-    document.getElementById("omeModal").style.display = "flex";
-    document.getElementById("omeTestResult").textContent = "";
-    document.getElementById("omeHost").value = "";
-    document.getElementById("omeUser").value = "";
-    const omePassEl = document.getElementById("omePass");
-    omePassEl.value = "";
-    omePassEl.dataset.unchanged = "false";
+    // Fetch BEFORE showing the modal to avoid a race where the user
+    // starts typing and the fetch response then overwrites their input.
+    let hostVal = "";
+    let userVal = "";
+    let hasPassword = false;
     try {
       const or = await fetch("/api/settings/ome");
       const od = await or.json();
       if (od && od.ok) {
-        document.getElementById("omeHost").value = od.host || "";
-        document.getElementById("omeUser").value = od.username || "";
-        omePassEl.value = od.has_password ? "********" : "";
-        omePassEl.dataset.unchanged = od.has_password ? "true" : "false";
+        hostVal = od.host || "";
+        userVal = od.username || "";
+        hasPassword = !!od.has_password;
       }
     } catch(e) {}
+    document.getElementById("omeHost").value = hostVal;
+    document.getElementById("omeUser").value = userVal;
+    const omePassEl = document.getElementById("omePass");
+    omePassEl.value = hasPassword ? "********" : "";
+    omePassEl.dataset.unchanged = hasPassword ? "true" : "false";
+    document.getElementById("omeTestResult").textContent = "";
+    document.getElementById("omeModal").style.display = "flex";
   }
 
   function closeOmeDialog() { document.getElementById("omeModal").style.display = "none"; }
