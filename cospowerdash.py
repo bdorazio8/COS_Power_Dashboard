@@ -1710,21 +1710,22 @@ def ui():
   }
   .human-server-header {
     display: flex;
-    align-items: baseline;
-    gap: 14px;
+    align-items: stretch;
     flex-wrap: wrap;
     line-height: 1.2;
   }
-  .human-server-ip {
-    font-size: 24px;
-    font-weight: 900;
+  .human-server-header .hdr-cell {
+    font-family: inherit;
+    font-size: 22px;
+    font-weight: 800;
     color: #f8fafc;
-    letter-spacing: 0.4px;
+    letter-spacing: 0.3px;
+    padding: 0 16px;
+    line-height: 1.2;
   }
-  .human-server-model-inline {
-    font-size: 18px;
-    font-weight: 700;
-    color: #cbd5e1;
+  .human-server-header .hdr-cell:first-child {
+    padding-left: 0;
+    border-right: 2px solid rgba(226,232,240,0.2);
   }
   .human-server-tag-sub {
     font-size: 16px;
@@ -3343,17 +3344,18 @@ def ui():
         var serverDiv = document.createElement("div");
         serverDiv.className = "human-server";
 
-        // IP and Model on the same primary heading line, service tag below
+        // Model and IP on the same primary heading line (model first),
+        // separated by a faded vertical divider. Identical font for both.
         var headerLine = document.createElement("div");
         headerLine.className = "human-server-header";
-        var ipSpan = document.createElement("span");
-        ipSpan.className = "human-server-ip";
-        ipSpan.textContent = ip;
         var modelSpan = document.createElement("span");
-        modelSpan.className = "human-server-model-inline";
+        modelSpan.className = "hdr-cell";
         modelSpan.textContent = model;
-        headerLine.appendChild(ipSpan);
+        var ipSpan = document.createElement("span");
+        ipSpan.className = "hdr-cell";
+        ipSpan.textContent = ip;
         headerLine.appendChild(modelSpan);
+        headerLine.appendChild(ipSpan);
         serverDiv.appendChild(headerLine);
 
         var tagLine = document.createElement("div");
@@ -3501,9 +3503,9 @@ def ui():
       + ".human-rack-header{margin:18px 0 10px 0;padding:6px 12px;font-size:18px;font-weight:900;color:#0f172a;background:#dbeafe;border-left:5px solid #1d4ed8;border-radius:3px;text-transform:uppercase;letter-spacing:1px;page-break-after:avoid;}"
       + ".human-rack-header:first-child{margin-top:0;}"
       + ".human-server{margin-bottom:14px;margin-left:14px;padding:12px 14px;background:#f8fafc;border-left:3px solid #1e40af;border-radius:4px;page-break-inside:avoid;}"
-      + ".human-server-header{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;line-height:1.2;}"
-      + ".human-server-ip{font-size:22px;font-weight:900;color:#0f172a;}"
-      + ".human-server-model-inline{font-size:16px;font-weight:700;color:#1e293b;}"
+      + ".human-server-header{display:flex;align-items:stretch;flex-wrap:wrap;line-height:1.2;}"
+      + ".human-server-header .hdr-cell{font-family:inherit;font-size:20px;font-weight:800;color:#0f172a;letter-spacing:0.3px;padding:0 14px;line-height:1.2;}"
+      + ".human-server-header .hdr-cell:first-child{padding-left:0;border-right:2px solid #cbd5e1;}"
       + ".human-server-tag-sub{font-size:14px;font-weight:600;color:#475569;margin-top:4px;}"
       + ".human-server-summary{margin-top:10px;padding:8px 0;font-size:15px;font-weight:700;color:#1e293b;border-bottom:1px solid #e2e8f0;}"
       + ".human-server-summary.attention{color:#b91c1c;}"
