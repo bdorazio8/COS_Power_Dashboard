@@ -1859,6 +1859,23 @@ def ui():
     position: relative;
   }
 
+  /* Vertical PDU view: side-by-side columns within the rack */
+  .pdu-columns {
+    display: flex;
+    flex: 1 1 0;
+    min-height: 0;
+    gap: 3px;
+  }
+  .pdu-columns .pdu-col,
+  .pdu-columns .pdu-col-left,
+  .pdu-columns .pdu-col-right {
+    flex: 1 1 0;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
   .crt-block {
     flex: 1 1 0;
     min-height: 0;
@@ -2482,6 +2499,11 @@ def ui():
         <label style="cursor:pointer;white-space:nowrap"><input type="radio" name="pduLoadStyle" value="grouped" id="loadGrouped" checked /> Grouped</label>
         <label style="cursor:pointer;white-space:nowrap"><input type="radio" name="pduLoadStyle" value="inline" id="loadInline" /> Individual</label>
       </div>
+      <div style="margin-top:12px;display:flex;align-items:center;gap:12px">
+        <span style="color:#cbd5e1;font-weight:600;white-space:nowrap">PDU View Style:</span>
+        <label style="cursor:pointer;white-space:nowrap"><input type="radio" name="pduViewStyle" value="horizontal" id="viewHorizontal" checked /> Horizontal</label>
+        <label style="cursor:pointer;white-space:nowrap"><input type="radio" name="pduViewStyle" value="vertical" id="viewVertical" /> Vertical</label>
+      </div>
       <div style="margin-top:16px;border-top:1px solid rgba(255,255,255,0.08);padding-top:12px;display:flex;gap:8px">
         <button onclick="openIdracDialog()" style="flex:1;padding:10px 14px;font-size:13px;background:rgba(37,99,235,0.3);color:#93c5fd;border:1px solid rgba(37,99,235,0.3);border-radius:10px;cursor:pointer;font-weight:700">Configure iDRAC</button>
         <button onclick="openOmeDialog()" style="flex:1;padding:10px 14px;font-size:13px;background:rgba(37,99,235,0.3);color:#93c5fd;border:1px solid rgba(37,99,235,0.3);border-radius:10px;cursor:pointer;font-weight:700">Configure OME</button>
@@ -2707,6 +2729,7 @@ def ui():
     if (s !== "inline") s = "grouped";
     return s;
   })();
+  let pduViewStyle = localStorage.getItem("pduViewStyle") || "horizontal";
   // Apply the fill-mode page override immediately (the .page element
   // already exists in the DOM by the time this script tag runs, since
   // the script is at the bottom of <body>).
@@ -2864,17 +2887,18 @@ def ui():
 
       const pdus = r.pdus || [];
       if (pdus.length > 0) {
-        pdus.forEach((pdu, pduIdx) => {
-          // PDU IP banner inside rack body
+        // Helper: build all DOM content for a single PDU and return in a container
+        function buildPduColumn(pdu) {
+          let col = document.createElement("div");
+          col.className = "pdu-col";
+
           let pduBanner = document.createElement("div");
           pduBanner.className = "ip-banner";
           pduBanner.textContent = pdu.pdu_ip ? ((pdu.type === "servertech" ? "Server Tech" : pdu.type === "raritan" ? "Raritan" : "PDU") + ": " + pdu.pdu_ip) : "\u00A0";
-          serverArea.appendChild(pduBanner);
+          col.appendChild(pduBanner);
 
-          // 3 phase boxes
           const ratedAForInline = (pdu.rated_a && pdu.rated_a > 0) ? pdu.rated_a : 30;
-          const blocks = (pdu.phases || []).slice();
-          blocks.forEach(phase => {
+          (pdu.phases || []).forEach(phase => {
             let block = document.createElement("div");
             block.className = "crt-block";
 
@@ -2913,8 +2937,6 @@ def ui():
               wattsVal.className = "crt-metric-val offline";
               wattsVal.textContent = "--";
             } else if (phase.power_w === null || phase.power_w === undefined) {
-              // Per-phase watts not exposed by hardware (e.g. ServerTech PRO4X).
-              // Dim placeholder so layout matches Raritan but does not imply real data.
               wattsVal.className = "crt-metric-val unavailable";
               wattsVal.textContent = "---";
             } else {
@@ -2927,18 +2949,38 @@ def ui():
 
             block.appendChild(body);
 
-            // Inline load bar at the bottom of the phase block (only when style=inline)
             if (pduLoadStyle === "inline") {
               block.appendChild(buildInlineLoadBar(phase, ratedAForInline));
             }
 
-            serverArea.appendChild(block);
+            col.appendChild(block);
           });
 
-          // Grouped load section below all phases (only when style=grouped)
           const loadSection = buildLoadSection(pdu);
-          if (loadSection) serverArea.appendChild(loadSection);
-        });
+          if (loadSection) col.appendChild(loadSection);
+          return col;
+        }
+
+        if (pduViewStyle === "vertical") {
+          // Side-by-side: PDU 1 on the left, PDU 2 on the right
+          let row = document.createElement("div");
+          row.className = "pdu-columns";
+          // Always render two columns so the layout is balanced
+          let leftCol = pdus[0] ? buildPduColumn(pdus[0]) : document.createElement("div");
+          leftCol.classList.add("pdu-col-left");
+          row.appendChild(leftCol);
+          let rightCol = pdus[1] ? buildPduColumn(pdus[1]) : document.createElement("div");
+          rightCol.classList.add("pdu-col-right");
+          row.appendChild(rightCol);
+          serverArea.appendChild(row);
+        } else {
+          // Horizontal (default): PDUs stacked top-to-bottom
+          pdus.forEach(pdu => {
+            let col = buildPduColumn(pdu);
+            // Append children directly into serverArea to preserve the flat layout
+            while (col.firstChild) serverArea.appendChild(col.firstChild);
+          });
+        }
       } else {
         let msg = document.createElement("div");
         msg.className = "no-pdu-msg";
@@ -3593,6 +3635,7 @@ def ui():
     document.getElementById("titleInput").value = current.trim();
     document.getElementById(viewportStyle === "fill" ? "vpFill" : "vpRacks").checked = true;
     document.getElementById(pduLoadStyle === "inline" ? "loadInline" : "loadGrouped").checked = true;
+    document.getElementById(pduViewStyle === "vertical" ? "viewVertical" : "viewHorizontal").checked = true;
     setTimeout(() => document.getElementById("titleInput").focus(), 50);
   }
 
@@ -3715,6 +3758,9 @@ def ui():
     const loadVal = document.querySelector('input[name="pduLoadStyle"]:checked').value;
     localStorage.setItem("pduLoadStyle", loadVal);
     pduLoadStyle = loadVal;
+    const viewVal = document.querySelector('input[name="pduViewStyle"]:checked').value;
+    localStorage.setItem("pduViewStyle", viewVal);
+    pduViewStyle = viewVal;
     computeRackSize(racksCache.length);
     render(racksCache);
     try {
