@@ -2416,7 +2416,7 @@ def ui():
         <div id="pduStatusText" class="status-text">Waiting for PDU…</div>
       </div>
 
-      <input id="pdu2Ip" placeholder="Right PDU IP (optional)" />
+      <input id="pdu2Ip" placeholder="Right PDU IP" />
       <div class="status-wrap">
         <div id="pdu2Light" class="status-light"></div>
         <div id="pdu2StatusText" class="status-text">Waiting for PDU…</div>
@@ -2441,7 +2441,7 @@ def ui():
         <div id="editPduStatusText" class="status-text">Waiting for PDU…</div>
       </div>
 
-      <input id="editPdu2Ip" placeholder="Right PDU IP (optional)" />
+      <input id="editPdu2Ip" placeholder="Right PDU IP" />
       <div class="status-wrap">
         <div id="editPdu2Light" class="status-light"></div>
         <div id="editPdu2StatusText" class="status-text">Waiting for PDU…</div>
