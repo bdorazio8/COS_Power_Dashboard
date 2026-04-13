@@ -1975,6 +1975,11 @@ def ui():
     gap: 2px;
     overflow: hidden;
   }
+  /* Vertical PDU view: stack AMPS/WATTS on top of each other instead of
+     side-by-side so they aren't crushed at half-rack width */
+  .pdu-columns .crt-body {
+    flex-direction: column;
+  }
   .crt-metric-col {
     flex: 3 0 0;
     min-width: 0;
