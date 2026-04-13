@@ -730,10 +730,10 @@ def api_add_rack(r: Rack):
     label = (r.label or "").strip()
     pdu_ip = (r.pdu_ip or "").strip()
     pdu2_ip = (r.pdu2_ip or "").strip()
-    if not label or not pdu_ip:
-        return {"ok": False, "error": "Missing label or PDU IP"}
+    if not label:
+        return {"ok": False, "error": "Missing label"}
     add_rack(label, pdu_ip, pdu2_ip)
-    logger.info("Rack added: %s (PDU1 %s, PDU2 %s)", label, pdu_ip, pdu2_ip or "none")
+    logger.info("Rack added: %s (Left %s, Right %s)", label, pdu_ip or "none", pdu2_ip or "none")
     return {"ok": True}
 
 @app.post("/api/racks/update")
@@ -742,10 +742,10 @@ def api_update_rack(data: dict):
     label = (data.get("label") or "").strip()
     pdu_ip = (data.get("pdu_ip") or "").strip()
     pdu2_ip = (data.get("pdu2_ip") or "").strip()
-    if not rack_id or not label or not pdu_ip:
-        return {"ok": False, "error": "Missing id, label, or PDU IP"}
+    if not rack_id or not label:
+        return {"ok": False, "error": "Missing id or label"}
     update_rack(int(rack_id), label, pdu_ip, pdu2_ip)
-    logger.info("Rack updated: id=%s %s (PDU1 %s, PDU2 %s)", rack_id, label, pdu_ip, pdu2_ip or "none")
+    logger.info("Rack updated: id=%s %s (Left %s, Right %s)", rack_id, label, pdu_ip or "none", pdu2_ip or "none")
     return {"ok": True}
 
 @app.post("/api/delete")
@@ -3152,8 +3152,8 @@ def ui():
   let lastPduCheckToken = 0;
   let pdu2CheckTimer = null;
   let lastPdu2CheckToken = 0;
-  let pduOk = false;
-  let pdu2Ok = true;  // empty PDU 2 is OK
+  let pduOk = true;   // empty Left PDU is OK
+  let pdu2Ok = true;  // empty Right PDU is OK
 
   function openAdd() {
     document.getElementById("addModal").style.display = "flex";
@@ -3171,7 +3171,7 @@ def ui():
     pdu2CheckTimer = null;
     lastPduCheckToken++;
     lastPdu2CheckToken++;
-    pduOk = false;
+    pduOk = true;
     pdu2Ok = true;
 
     document.getElementById("pduLight").classList.remove("green");
@@ -3231,9 +3231,10 @@ def ui():
   async function checkPduIp(ip, setFn, tokenProp) {
     const token = tokenProp === 2 ? ++lastPdu2CheckToken : ++lastPduCheckToken;
     if (!ip || ip.length < 7) {
-      setFn(tokenProp === 2 ? true : false, "Waiting for PDU\u2026");
-      if (tokenProp === 2) document.getElementById("pdu2Light").classList.remove("green");
-      else if (tokenProp === 1) { /* PDU 1 required, keep red */ }
+      // Empty field is fine for either PDU — mark OK and reset the light
+      setFn(true, "Waiting for PDU\u2026");
+      const lightId = tokenProp === 2 ? "pdu2Light" : "pduLight";
+      document.getElementById(lightId).classList.remove("green");
       updateApplyBtn();
       return;
     }
@@ -3340,8 +3341,8 @@ def ui():
     const errEl = document.getElementById("addError");
     errEl.textContent = "";
 
-    if (!label || !pduIp) {
-      errEl.textContent = "Enter label + PDU IP";
+    if (!label) {
+      errEl.textContent = "Enter a rack label";
       return;
     }
 
@@ -3374,8 +3375,8 @@ def ui():
   let editPdu2CheckTimer = null;
   let lastEditPduToken = 0;
   let lastEditPdu2Token = 0;
-  let editPduOk = false;
-  let editPdu2Ok = true;
+  let editPduOk = true;   // empty Left PDU is OK
+  let editPdu2Ok = true;  // empty Right PDU is OK
 
   function openEdit(rack) {
     editRackId = rack.id;
@@ -3385,15 +3386,19 @@ def ui():
     document.getElementById("editPdu2Ip").value = rack.pdu2_ip || "";
     document.getElementById("editError").textContent = "";
 
-    // Run checks on existing IPs
-    editPduOk = false;
+    // Run checks on existing IPs — both start OK (empty is fine)
+    editPduOk = true;
     editPdu2Ok = true;
     document.getElementById("editPduLight").classList.remove("green");
-    document.getElementById("editPduStatusText").innerText = "Checking\u2026";
+    document.getElementById("editPduStatusText").innerText = "Waiting for PDU\u2026";
     document.getElementById("editPdu2Light").classList.remove("green");
     document.getElementById("editPdu2StatusText").innerText = "Waiting for PDU\u2026";
 
-    if (rack.pdu_ip) checkEditPdu(rack.pdu_ip, 1);
+    if (rack.pdu_ip) {
+      editPduOk = false;
+      document.getElementById("editPduStatusText").innerText = "Checking\u2026";
+      checkEditPdu(rack.pdu_ip, 1);
+    }
     if (rack.pdu2_ip) {
       editPdu2Ok = false;
       document.getElementById("editPdu2StatusText").innerText = "Checking\u2026";
@@ -3461,8 +3466,10 @@ def ui():
     const token = which === 2 ? ++lastEditPdu2Token : ++lastEditPduToken;
     const setFn = which === 2 ? setEditPdu2Ok : setEditPduOk;
     if (!ip || ip.length < 7) {
-      if (which === 2) { setEditPdu2Ok(true, "Waiting for PDU\u2026"); document.getElementById("editPdu2Light").classList.remove("green"); }
-      else setEditPduOk(false, "Waiting for PDU\u2026");
+      // Empty field is fine for either PDU
+      const lightId = which === 2 ? "editPdu2Light" : "editPduLight";
+      document.getElementById(lightId).classList.remove("green");
+      setFn(true, "Waiting for PDU\u2026");
       return;
     }
     setFn(false, "Checking\u2026");
@@ -3491,7 +3498,7 @@ def ui():
     const errEl = document.getElementById("editError");
     errEl.textContent = "";
 
-    if (!label || !pduIp) { errEl.textContent = "Enter label + PDU IP"; return; }
+    if (!label) { errEl.textContent = "Enter a rack label"; return; }
 
     btn.disabled = true; btn.classList.add("disabled");
     try {
