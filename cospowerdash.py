@@ -1975,10 +1975,38 @@ def ui():
     gap: 2px;
     overflow: hidden;
   }
-  /* Vertical PDU view: stack AMPS/WATTS on top of each other instead of
-     side-by-side so they aren't crushed at half-rack width */
-  .pdu-columns .crt-body {
+  /* Vertical PDU view: use CSS grid on each phase block so the label spans
+     the top, the AMPS/WATTS body fills the left, and the inline load bar
+     becomes a vertical strip on the right side of the block. */
+  .pdu-columns .crt-block {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    grid-template-rows: auto 1fr;
+  }
+  .pdu-columns .crt-block .crt-label {
+    grid-column: 1 / -1;
+  }
+  .pdu-columns .crt-block .crt-body {
+    grid-column: 1;
+    grid-row: 2;
     flex-direction: column;
+  }
+  .pdu-columns .crt-block .pdu-load-track.inline-loadbar {
+    grid-column: 2;
+    grid-row: 2;
+    flex-direction: column;
+    width: clamp(10px, 2.8cqi, 22px);
+    height: auto;
+    margin-top: 0;
+    margin-bottom: 0;
+    margin-left: 2px;
+  }
+  .pdu-columns .crt-block .pdu-load-track.inline-loadbar .pdu-load-seg {
+    border-right: none;
+    border-bottom: 2px solid #0b1220;
+  }
+  .pdu-columns .crt-block .pdu-load-track.inline-loadbar .pdu-load-seg:last-child {
+    border-bottom: none;
   }
   .crt-metric-col {
     flex: 3 0 0;
