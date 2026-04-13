@@ -2528,7 +2528,7 @@ def ui():
         <label style="cursor:pointer;white-space:nowrap"><input type="radio" name="viewportStyle" value="fill" id="vpFill" /> Fill</label>
       </div>
       <div style="margin-top:12px;display:flex;align-items:center;gap:12px">
-        <span style="color:#cbd5e1;font-weight:600;white-space:nowrap">PDU Load Style:</span>
+        <span style="color:#cbd5e1;font-weight:600;white-space:nowrap">PDU Bar Style:</span>
         <label style="cursor:pointer;white-space:nowrap"><input type="radio" name="pduLoadStyle" value="grouped" id="loadGrouped" checked /> Grouped</label>
         <label style="cursor:pointer;white-space:nowrap"><input type="radio" name="pduLoadStyle" value="inline" id="loadInline" /> Individual</label>
       </div>
