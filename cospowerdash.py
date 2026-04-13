@@ -2410,13 +2410,13 @@ def ui():
     <div class="modal-content">
       <h3>Add Rack</h3>
       <input id="label" placeholder="Rack Label" />
-      <input id="pduIp" placeholder="PDU 1 IP" />
+      <input id="pduIp" placeholder="Left PDU IP" />
       <div class="status-wrap">
         <div id="pduLight" class="status-light"></div>
         <div id="pduStatusText" class="status-text">Waiting for PDU…</div>
       </div>
 
-      <input id="pdu2Ip" placeholder="PDU 2 IP (optional)" />
+      <input id="pdu2Ip" placeholder="Right PDU IP (optional)" />
       <div class="status-wrap">
         <div id="pdu2Light" class="status-light"></div>
         <div id="pdu2StatusText" class="status-text">Waiting for PDU…</div>
@@ -2435,13 +2435,13 @@ def ui():
     <div class="modal-content">
       <h3>Edit Rack</h3>
       <input id="editLabel" placeholder="Rack Label" />
-      <input id="editPduIp" placeholder="PDU 1 IP" />
+      <input id="editPduIp" placeholder="Left PDU IP" />
       <div class="status-wrap">
         <div id="editPduLight" class="status-light"></div>
         <div id="editPduStatusText" class="status-text">Waiting for PDU…</div>
       </div>
 
-      <input id="editPdu2Ip" placeholder="PDU 2 IP (optional)" />
+      <input id="editPdu2Ip" placeholder="Right PDU IP (optional)" />
       <div class="status-wrap">
         <div id="editPdu2Light" class="status-light"></div>
         <div id="editPdu2StatusText" class="status-text">Waiting for PDU…</div>
@@ -2967,7 +2967,7 @@ def ui():
         }
 
         if (pduViewStyle === "vertical") {
-          // Side-by-side: PDU 1 on the left, PDU 2 on the right
+          // Side-by-side: Left PDU on the left, Right PDU on the right
           let row = document.createElement("div");
           row.className = "pdu-columns";
           // Always render two columns so the layout is balanced
