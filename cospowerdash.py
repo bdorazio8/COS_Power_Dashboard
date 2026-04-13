@@ -3068,7 +3068,14 @@ def ui():
   }
 
   function autoSizeMetrics() {
-    document.querySelectorAll(".crt-block").forEach(block => {
+    const blocks = document.querySelectorAll(".crt-block");
+    // First pass: compute the ideal font size for each block, track the
+    // global minimum so every metric on the page is sized uniformly.
+    let globalMinVal = Infinity;
+    let globalMinUnit = Infinity;
+    let globalMinLabel = Infinity;
+    const blockInfos = [];
+    blocks.forEach(block => {
       const body = block.querySelector(".crt-body");
       if (!body) return;
       const bh = body.clientHeight;
@@ -3076,8 +3083,8 @@ def ui():
       if (bh <= 0 || bw <= 0) return;
 
       const metricCols = body.querySelectorAll(".crt-metric-col");
-      let minValSize = Infinity;
-      let minUnitSize = Infinity;
+      let localMinVal = Infinity;
+      let localMinUnit = Infinity;
       metricCols.forEach(col => {
         const cw = col.clientWidth - 4;
         if (cw <= 0) return;
@@ -3086,21 +3093,30 @@ def ui():
           const text = val.textContent || "000";
           const maxByWidth = cw / (text.length * 0.65);
           const size = Math.max(8, Math.min(bh * 0.55, maxByWidth));
-          if (size < minValSize) minValSize = size;
+          if (size < localMinVal) localMinVal = size;
         }
         const unitSize = Math.max(6, Math.min(bh * 0.22, cw * 0.22));
-        if (unitSize < minUnitSize) minUnitSize = unitSize;
+        if (unitSize < localMinUnit) localMinUnit = unitSize;
       });
+      const blockH = block.clientHeight || bh;
+      const labelSize = Math.max(8, Math.min(bw * 0.055, blockH * 0.2));
+
+      if (localMinVal < globalMinVal) globalMinVal = localMinVal;
+      if (localMinUnit < globalMinUnit) globalMinUnit = localMinUnit;
+      if (labelSize < globalMinLabel) globalMinLabel = labelSize;
+      blockInfos.push({ block, metricCols });
+    });
+
+    // Second pass: apply the global minimum to every block for uniformity
+    blockInfos.forEach(({ block, metricCols }) => {
       metricCols.forEach(col => {
         const unit = col.querySelector(".crt-metric-unit");
         const val = col.querySelector(".crt-metric-val");
-        if (unit) unit.style.fontSize = minUnitSize + "px";
-        if (val) val.style.fontSize = minValSize + "px";
+        if (unit) unit.style.fontSize = globalMinUnit + "px";
+        if (val) val.style.fontSize = globalMinVal + "px";
       });
-
       const lbl = block.querySelector(".crt-label");
-      const blockH = block.clientHeight || bh;
-      if (lbl) lbl.style.fontSize = Math.max(8, Math.min(bw * 0.055, blockH * 0.2)) + "px";
+      if (lbl) lbl.style.fontSize = globalMinLabel + "px";
     });
   }
 
