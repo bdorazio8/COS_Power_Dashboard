@@ -1994,7 +1994,7 @@ def ui():
   .pdu-columns .crt-block .pdu-load-track.inline-loadbar {
     grid-column: 2;
     grid-row: 2;
-    flex-direction: column;
+    flex-direction: column-reverse;
     width: clamp(10px, 2.8cqi, 22px);
     height: auto;
     margin-top: 0;
