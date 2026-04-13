@@ -2967,14 +2967,18 @@ def ui():
         }
 
         if (pduViewStyle === "vertical") {
-          // Side-by-side: Left PDU on the left, Right PDU on the right
+          // Side-by-side: Left PDU (pdu_key=pdu_ip) on the left,
+          // Right PDU (pdu_key=pdu2_ip) on the right. Find each by
+          // its pdu_key rather than array index so a rack with only a
+          // Right PDU correctly shows it in the right column.
+          const leftPdu = pdus.find(p => p.pdu_key === "pdu_ip") || null;
+          const rightPdu = pdus.find(p => p.pdu_key === "pdu2_ip") || null;
           let row = document.createElement("div");
           row.className = "pdu-columns";
-          // Always render two columns so the layout is balanced
-          let leftCol = pdus[0] ? buildPduColumn(pdus[0]) : document.createElement("div");
+          let leftCol = leftPdu ? buildPduColumn(leftPdu) : document.createElement("div");
           leftCol.classList.add("pdu-col-left");
           row.appendChild(leftCol);
-          let rightCol = pdus[1] ? buildPduColumn(pdus[1]) : document.createElement("div");
+          let rightCol = rightPdu ? buildPduColumn(rightPdu) : document.createElement("div");
           rightCol.classList.add("pdu-col-right");
           row.appendChild(rightCol);
           serverArea.appendChild(row);
