@@ -64,6 +64,114 @@ _stream_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(me
 logger.addHandler(_stream_handler)
 
 # ----------------------------
+# Slack Alerts
+# ----------------------------
+
+import time as _time
+
+SLACK_ALERT_DELAY = 15  # seconds a condition must persist before firing an alert
+PHASE_OVERLOAD_PCT = 80  # % of rated amps that triggers the alert
+
+# Debounce state: tracks when a condition first appeared and whether we've notified.
+# Key = (rack_id, pdu_key, phase_label, alert_type) e.g. (3, "pdu_ip", "Phase A", "overload")
+_alert_pending: Dict[tuple, float] = {}   # key -> first_seen monotonic timestamp
+_alert_sent: Dict[tuple, bool] = {}       # key -> True if alert already sent
+_recovery_pending: Dict[tuple, bool] = {} # key -> True if recovery msg needed
+
+async def _send_slack_message(webhook_url: str, text: str):
+    """POST a message to a Slack webhook. Fire-and-forget from the poll loop."""
+    try:
+        resp = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: req_lib.post(webhook_url, json={"text": text}, timeout=10))
+        if resp.status_code != 200:
+            logger.warning("Slack webhook returned %s: %s", resp.status_code, resp.text[:200])
+    except Exception as e:
+        logger.warning("Failed to send Slack alert: %s", e)
+
+async def send_slack_alert(rack_label: str, pdu_ip: str, pdu_type: str,
+                           phase_label: str, current_a: float, rated_a: float,
+                           pct: float, is_recovery: bool = False):
+    """Format and send a phase-overload or recovery alert to Slack."""
+    webhook_url = get_setting("slack_webhook_url", "")
+    if not webhook_url:
+        return
+    pdu_name = "Server Tech" if pdu_type == "servertech" else "Raritan" if pdu_type == "raritan" else "PDU"
+    if is_recovery:
+        emoji = ":large_green_circle:"
+        header = "*POWER RECOVERY*"
+        lines = [
+            f"{emoji} {header}",
+            f"Rack: {rack_label}",
+            f"{pdu_name}: {pdu_ip}",
+            f"{phase_label} load dropped to {pct:.0f}% ({current_a:.2f}A / {rated_a:.0f}A rated)",
+            f"Threshold: {PHASE_OVERLOAD_PCT}%",
+        ]
+    else:
+        emoji = ":rotating_light:"
+        header = "*POWER ALERT*"
+        lines = [
+            f"{emoji} {header}",
+            f"Rack: {rack_label}",
+            f"{pdu_name}: {pdu_ip}",
+            f"{phase_label} load at {pct:.0f}% ({current_a:.2f}A / {rated_a:.0f}A rated)",
+            f"Threshold: {PHASE_OVERLOAD_PCT}%",
+        ]
+    await _send_slack_message(webhook_url, "\n".join(lines))
+
+def _maybe_slack_alert(key: tuple, rack_label: str, pdu_ip: str, pdu_type: str,
+                       phase_label: str, current_a: float, rated_a: float, pct: float):
+    """Debounce: only fire after the condition persists for SLACK_ALERT_DELAY seconds."""
+    now = _time.monotonic()
+    if key not in _alert_pending:
+        _alert_pending[key] = now
+        logger.debug("Alert pending: %s %s %s — waiting %ds", rack_label, pdu_ip, phase_label, SLACK_ALERT_DELAY)
+        return
+    elapsed = now - _alert_pending[key]
+    if elapsed >= SLACK_ALERT_DELAY and not _alert_sent.get(key):
+        _alert_sent[key] = True
+        logger.info("Alert confirmed after %ds: %s %s %s at %.0f%% — sending Slack",
+                     int(elapsed), rack_label, pdu_ip, phase_label, pct)
+        asyncio.create_task(send_slack_alert(
+            rack_label, pdu_ip, pdu_type, phase_label, current_a, rated_a, pct))
+
+def _clear_alert(key: tuple):
+    """Clear a pending/sent alert when the condition resolves."""
+    was_sent = _alert_sent.get(key, False)
+    _alert_pending.pop(key, None)
+    _alert_sent.pop(key, None)
+    if was_sent:
+        _recovery_pending[key] = True
+
+def _check_recovery(key: tuple, rack_label: str, pdu_ip: str, pdu_type: str,
+                    phase_label: str, current_a: float, rated_a: float, pct: float):
+    """Debounce recovery: only send after condition is clear for SLACK_ALERT_DELAY."""
+    if not _recovery_pending.get(key):
+        return
+    recovery_key = key + ("recovery",)
+    now = _time.monotonic()
+    if recovery_key not in _alert_pending:
+        _alert_pending[recovery_key] = now
+        return
+    elapsed = now - _alert_pending[recovery_key]
+    if elapsed >= SLACK_ALERT_DELAY and not _alert_sent.get(recovery_key):
+        _alert_sent[recovery_key] = True
+        logger.info("Recovery confirmed after %ds: %s %s %s at %.0f%%",
+                     int(elapsed), rack_label, pdu_ip, phase_label, pct)
+        asyncio.create_task(send_slack_alert(
+            rack_label, pdu_ip, pdu_type, phase_label, current_a, rated_a, pct, is_recovery=True))
+        # Clean up
+        _recovery_pending.pop(key, None)
+        _alert_pending.pop(recovery_key, None)
+        _alert_sent.pop(recovery_key, None)
+
+def _cancel_recovery(key: tuple):
+    """Cancel recovery if condition returns before recovery fires."""
+    _recovery_pending.pop(key, None)
+    recovery_key = key + ("recovery",)
+    _alert_pending.pop(recovery_key, None)
+    _alert_sent.pop(recovery_key, None)
+
+# ----------------------------
 # App
 # ----------------------------
 
@@ -637,6 +745,9 @@ async def poll_loop():
                         phases_all.append({"pdu_ip": pdu_ip, "pdu_key": pdu_key, "reachable": False, "total_w": None, "total_a": None, "rated_a": _pdu_rated_a_cache.get(pdu_ip, RATED_AMPS_DEFAULT), "phases": [
                             {"label": "Phase " + p, "current_a": 0, "power_w": 0, "reachable": False} for p in ("A", "B", "C")
                         ]})
+                        # PDU unreachable — clear any pending overload alerts
+                        for p in ("A", "B", "C"):
+                            _clear_alert((rid, pdu_key, "Phase " + p, "overload"))
                         continue
 
                     if pdu_ip not in pdu_type_cache:
@@ -678,6 +789,26 @@ async def poll_loop():
 
                     rated_a = get_pdu_rated_amps(pdu_ip)
                     phases_all.append({"pdu_ip": pdu_ip, "pdu_key": pdu_key, "reachable": True, "type": pdu_type, "phases": phases, "total_w": total_w, "total_a": total_a, "rated_a": rated_a})
+
+                    # --- Slack phase-overload checks ---
+                    rack_label = rack.get("label", "?")
+                    for phase in phases:
+                        plabel = phase.get("label", "?")
+                        p_amps = phase.get("current_a", 0)
+                        alert_key = (rid, pdu_key, plabel, "overload")
+                        if rated_a > 0 and phase.get("reachable"):
+                            load_pct = (p_amps / rated_a) * 100
+                            if load_pct >= PHASE_OVERLOAD_PCT:
+                                _maybe_slack_alert(alert_key, rack_label, pdu_ip,
+                                                   pdu_type or "", plabel, p_amps, rated_a, load_pct)
+                                _cancel_recovery(alert_key)
+                            else:
+                                _clear_alert(alert_key)
+                                _check_recovery(alert_key, rack_label, pdu_ip,
+                                                pdu_type or "", plabel, p_amps, rated_a, load_pct)
+                        else:
+                            # Unreachable or no rated_a — can't evaluate, clear any pending
+                            _clear_alert(alert_key)
 
                 latest_pdu_phases[rid] = phases_all
 
@@ -961,6 +1092,37 @@ def api_test_ome(data: dict):
         if resp.status_code in (200, 201):
             return {"ok": True}
         return {"ok": False, "error": f"Auth failed (HTTP {resp.status_code})"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+# ----------------------------
+# Slack Webhook Settings API
+# ----------------------------
+
+@app.get("/api/settings/slack_webhook")
+def api_get_slack_webhook():
+    url = get_setting("slack_webhook_url", "")
+    return {"ok": True, "url": url}
+
+@app.post("/api/settings/slack_webhook")
+def api_set_slack_webhook(data: dict):
+    url = (data.get("url") or "").strip()
+    set_setting("slack_webhook_url", url)
+    logger.info("Slack webhook URL %s", "configured" if url else "cleared")
+    return {"ok": True, "url": url}
+
+@app.post("/api/settings/slack_test")
+async def api_test_slack(data: dict):
+    url = (data.get("url") or "").strip()
+    if not url:
+        return {"ok": False, "error": "No webhook URL provided"}
+    try:
+        text = ":rotating_light: *POWER ALERT*\nThis is a test alert from COS Power Dashboard."
+        resp = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: req_lib.post(url, json={"text": text}, timeout=10))
+        if resp.status_code == 200:
+            return {"ok": True}
+        return {"ok": False, "error": f"Slack returned {resp.status_code}"}
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
@@ -2543,6 +2705,7 @@ def ui():
       </div>
       <div style="margin-top:8px;display:flex;gap:8px">
         <button onclick="openCustomReportingDialog()" style="flex:1;padding:10px 14px;font-size:13px;background:rgba(37,99,235,0.3);color:#93c5fd;border:1px solid rgba(37,99,235,0.3);border-radius:10px;cursor:pointer;font-weight:700">Configure Custom Reporting</button>
+        <button onclick="openSlackDialog()" style="flex:1;padding:10px 14px;font-size:13px;background:rgba(37,99,235,0.3);color:#93c5fd;border:1px solid rgba(37,99,235,0.3);border-radius:10px;cursor:pointer;font-weight:700">Configure Slack</button>
       </div>
       <div class="row" style="margin-top:12px">
         <button class="primary" onclick="saveSettings()">Save</button>
@@ -2590,6 +2753,24 @@ def ui():
       <div class="row" style="margin-top:12px">
         <button class="primary" onclick="saveOmeDialog()">Save</button>
         <button onclick="closeOmeDialog()">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Slack Configuration Modal -->
+  <div class="modal" id="slackModal">
+    <div class="modal-content">
+      <h3>Configure Slack</h3>
+      <div style="font-size:12px;color:rgba(148,163,184,0.85);margin-bottom:10px">Sends power alerts to a Slack channel via an Incoming Webhook. Alerts fire when any PDU phase exceeds 80% of its rated amperage for 15+ seconds.</div>
+      <div style="margin-bottom:4px"><span style="color:#cbd5e1;font-weight:600">Webhook URL:</span></div>
+      <input id="slackWebhookUrl" style="margin-bottom:8px" />
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+        <button onclick="testSlack()" style="white-space:nowrap;padding:10px 14px;font-size:13px;background:rgba(37,99,235,0.3);color:#93c5fd;border:1px solid rgba(37,99,235,0.3);border-radius:10px;cursor:pointer;font-weight:700">Test</button>
+        <span id="slackTestResult" style="font-size:13px;font-weight:700"></span>
+      </div>
+      <div class="row" style="margin-top:12px">
+        <button class="primary" onclick="saveSlackDialog()">Save</button>
+        <button onclick="closeSlackDialog()">Cancel</button>
       </div>
     </div>
   </div>
@@ -3963,6 +4144,50 @@ def ui():
       });
     } catch(e) {}
     closeCustomReportingDialog();
+  }
+
+  // ---------------- Slack Configuration ----------------
+  async function openSlackDialog() {
+    let url = "";
+    try {
+      const r = await fetch("/api/settings/slack_webhook");
+      const d = await r.json();
+      if (d && d.ok) url = d.url || "";
+    } catch(e) {}
+    document.getElementById("slackWebhookUrl").value = url;
+    document.getElementById("slackTestResult").textContent = "";
+    document.getElementById("slackModal").style.display = "flex";
+  }
+
+  function closeSlackDialog() {
+    document.getElementById("slackModal").style.display = "none";
+  }
+
+  async function testSlack() {
+    const url = document.getElementById("slackWebhookUrl").value.trim();
+    const result = document.getElementById("slackTestResult");
+    if (!url) { result.textContent = "Enter a webhook URL"; result.style.color = "#f87171"; return; }
+    result.textContent = "Sending..."; result.style.color = "#94a3b8";
+    try {
+      const res = await fetch("/api/settings/slack_test", {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({url: url})
+      });
+      const data = await res.json();
+      if (data.ok) { result.textContent = "Sent! Check your Slack channel."; result.style.color = "#22c55e"; }
+      else { result.textContent = data.error || "Failed"; result.style.color = "#f87171"; }
+    } catch(e) { result.textContent = "Test failed"; result.style.color = "#f87171"; }
+  }
+
+  async function saveSlackDialog() {
+    const url = document.getElementById("slackWebhookUrl").value.trim();
+    try {
+      await fetch("/api/settings/slack_webhook", {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({url: url})
+      });
+    } catch(e) {}
+    closeSlackDialog();
   }
 
   // ---------------- Reports ----------------
