@@ -1,12 +1,9 @@
 import asyncio
 import json
 import logging
-import smtplib
 import sqlite3
-import ssl
 import subprocess
 import urllib3
-from email.message import EmailMessage
 from logging.handlers import RotatingFileHandler
 from typing import Dict, Set, List, Optional
 
@@ -24,6 +21,25 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 DB = "powerdash.db"
 SNMP_COMMUNITY = "public"
 DEFAULT_DASH_TITLE = "Power Dashboard"
+
+# Directory where scheduled Lab Overview Reports are dropped as timestamped PDFs.
+# The companion mailer app (see ./mailer/) SCPs config.ini + new PDFs from here.
+REPORTS_DIR = "reports"
+REPORT_RETENTION_DAYS = 90
+REPORT_SCHEDULES = {
+    # key → (human label, cron-ish "HH:MM" when to fire, predicate: (now_local) -> bool)
+    "disabled":         "Disabled (no scheduled reports)",
+    "daily_23_00":      "Daily at 23:00",
+    "weekdays_17_00":   "Weekdays (Mon–Fri) at 17:00",
+    "weekly_sat_23_30": "Weekly on Saturday at 23:30",
+    "monthly_1st_02_00":"Monthly on the 1st at 02:00",
+}
+REPORT_TIME_RANGES = {
+    "trailing_24h":      "Trailing 24 hours",
+    "trailing_7d":       "Trailing 7 days",
+    "trailing_30d":      "Trailing 30 days",
+    "prev_week_mon_fri": "Previous Mon–Fri (business week)",
+}
 
 # PDU model detection (both Server Tech and Raritan share enterprise 13742)
 OID_PDU_MODEL = "1.3.6.1.4.1.13742.6.3.2.1.1.3.1"
@@ -825,6 +841,43 @@ async def poll_loop():
             logger.error("Error in poll loop: %s", e)
         await asyncio.sleep(2)
 
+def _should_fire_now(schedule: str) -> bool:
+    """Does the configured schedule want to fire at this exact minute?"""
+    from datetime import datetime
+    n = datetime.now()
+    if schedule == "daily_23_00":
+        return n.hour == 23 and n.minute == 0
+    if schedule == "weekdays_17_00":
+        return n.weekday() < 5 and n.hour == 17 and n.minute == 0
+    if schedule == "weekly_sat_23_30":
+        return n.weekday() == 5 and n.hour == 23 and n.minute == 30
+    if schedule == "monthly_1st_02_00":
+        return n.day == 1 and n.hour == 2 and n.minute == 0
+    return False
+
+async def report_scheduler_loop():
+    """Wake twice a minute; when the wall clock crosses the configured fire time,
+    generate a Lab Overview PDF into REPORTS_DIR. Uses report_last_fire_iso to
+    dedupe across restarts within the same minute."""
+    from datetime import datetime
+    await asyncio.sleep(10)  # let startup settle before first check
+    while True:
+        try:
+            schedule = get_setting("report_schedule", "disabled")
+            if schedule != "disabled" and _should_fire_now(schedule):
+                key = datetime.now().strftime("%Y-%m-%dT%H:%M")
+                last = get_setting("report_last_fire_iso", "")
+                if last != key:
+                    set_setting("report_last_fire_iso", key)
+                    logger.info("Report scheduler firing (schedule=%s, at=%s)", schedule, key)
+                    try:
+                        await asyncio.get_event_loop().run_in_executor(None, _run_scheduled_report)
+                    except Exception:
+                        logger.exception("Scheduled report generation failed")
+        except Exception:
+            logger.exception("Report scheduler loop error")
+        await asyncio.sleep(30)
+
 # ----------------------------
 # App Lifecycle
 # ----------------------------
@@ -832,8 +885,14 @@ async def poll_loop():
 @app.on_event("startup")
 async def startup():
     init_db()
+    _ensure_reports_dir()
+    try:
+        _write_report_config_ini()
+    except Exception as e:
+        logger.warning("Could not write initial reports/config.ini: %s", e)
     logger.info("Power Dashboard starting, database initialized")
     asyncio.create_task(poll_loop())
+    asyncio.create_task(report_scheduler_loop())
 
 # ----------------------------
 # REST API
@@ -1130,89 +1189,145 @@ async def api_test_slack(data: dict):
         return {"ok": False, "error": str(e)}
 
 # ----------------------------
-# Email (SMTP) Settings API
+# Report Delivery Settings API
+# Writes to both the SQLite settings table (for the dashboard UI)
+# and reports/config.ini (for the external mailer app to read over SCP).
 # ----------------------------
 
-def _send_smtp_email(host: str, port: int, username: str, password: str,
-                     from_addr: str, to_addrs: List[str], subject: str, body: str) -> None:
-    """Send a plain-text email via SMTP + STARTTLS. Raises on failure."""
-    msg = EmailMessage()
-    msg["From"] = from_addr
-    msg["To"] = ", ".join(to_addrs)
-    msg["Subject"] = subject
-    msg.set_content(body)
-    ctx = ssl.create_default_context()
-    with smtplib.SMTP(host, port, timeout=20) as s:
-        s.ehlo()
-        s.starttls(context=ctx)
-        s.ehlo()
-        s.login(username, password)
-        s.send_message(msg)
+import configparser as _configparser
+import os as _os
 
-@app.get("/api/settings/email")
-def api_get_email_settings():
+def _ensure_reports_dir():
+    _os.makedirs(REPORTS_DIR, exist_ok=True)
+    sent_log = _os.path.join(REPORTS_DIR, "sent.log")
+    if not _os.path.exists(sent_log):
+        with open(sent_log, "w") as f:
+            f.write("# Appended by the mailer app after each successful send.\n")
+            f.write("# Format: ISO8601\tfilename\trecipients\n")
+
+def _write_report_config_ini():
+    """Serialize the current report-delivery settings into reports/config.ini.
+    The mailer app reads this over SCP to learn recipients, schedule, etc."""
+    _ensure_reports_dir()
+    cfg = _configparser.ConfigParser()
+    cfg["delivery"] = {
+        "recipients":       get_setting("report_recipients", ""),
+        "schedule":         get_setting("report_schedule", "disabled"),
+        "scope":            get_setting("report_scope", ""),
+        "time_range":       get_setting("report_time_range", "trailing_7d"),
+        "subject_template": get_setting("report_subject", "COS Lab Weekly Power Report — {start} to {end}"),
+        "sender_label":     get_setting("report_sender_label", "COS Power Dashboard"),
+    }
+    path = _os.path.join(REPORTS_DIR, "config.ini")
+    with open(path, "w") as f:
+        f.write("# Written by cospowerdash on every Save in Settings → Configure Report Delivery.\n")
+        f.write("# The mailer app reads this to know who to send to, on what cadence, etc.\n")
+        cfg.write(f)
+
+@app.get("/api/settings/report_delivery")
+def api_get_report_delivery():
     return {
         "ok": True,
-        "host": get_setting("smtp_host", ""),
-        "port": get_setting("smtp_port", "587"),
-        "username": get_setting("smtp_username", ""),
-        "from_addr": get_setting("smtp_from", ""),
-        "recipients": get_setting("smtp_recipients", ""),
-        "has_password": bool(get_setting("smtp_password", "")),
+        "recipients":        get_setting("report_recipients", ""),
+        "schedule":          get_setting("report_schedule", "disabled"),
+        "scope":             get_setting("report_scope", ""),
+        "time_range":        get_setting("report_time_range", "trailing_7d"),
+        "subject_template":  get_setting("report_subject", "COS Lab Weekly Power Report — {start} to {end}"),
+        "sender_label":      get_setting("report_sender_label", "COS Power Dashboard"),
+        "schedule_options":  REPORT_SCHEDULES,
+        "time_range_options":REPORT_TIME_RANGES,
     }
 
-@app.post("/api/settings/email")
-def api_set_email_settings(data: dict):
-    host = (data.get("host") or "").strip()
-    port = (data.get("port") or "").strip() or "587"
-    username = (data.get("username") or "").strip()
-    password = (data.get("password") or "").strip()
-    from_addr = (data.get("from_addr") or "").strip() or username
+@app.post("/api/settings/report_delivery")
+def api_set_report_delivery(data: dict):
     recipients = (data.get("recipients") or "").strip()
-    if not host or not username:
-        return {"ok": False, "error": "Host and username are required"}
+    schedule   = (data.get("schedule") or "disabled").strip()
+    scope      = (data.get("scope") or "").strip()
+    time_range = (data.get("time_range") or "trailing_7d").strip()
+    subject    = (data.get("subject_template") or "").strip() or "COS Lab Weekly Power Report — {start} to {end}"
+    sender_lbl = (data.get("sender_label") or "").strip() or "COS Power Dashboard"
+    if schedule not in REPORT_SCHEDULES:
+        return {"ok": False, "error": f"Invalid schedule '{schedule}'"}
+    if time_range not in REPORT_TIME_RANGES:
+        return {"ok": False, "error": f"Invalid time_range '{time_range}'"}
+    set_setting("report_recipients", recipients)
+    set_setting("report_schedule", schedule)
+    set_setting("report_scope", scope)
+    set_setting("report_time_range", time_range)
+    set_setting("report_subject", subject)
+    set_setting("report_sender_label", sender_lbl)
     try:
-        int(port)
-    except ValueError:
-        return {"ok": False, "error": "Port must be a number"}
-    set_setting("smtp_host", host)
-    set_setting("smtp_port", port)
-    set_setting("smtp_username", username)
-    set_setting("smtp_from", from_addr)
-    set_setting("smtp_recipients", recipients)
-    if password:
-        set_setting("smtp_password", password)
-    logger.info("SMTP settings updated (host=%s, user=%s)", host, username)
+        _write_report_config_ini()
+    except Exception as e:
+        logger.warning("Failed to write reports/config.ini: %s", e)
+        return {"ok": False, "error": f"Saved settings but failed to write config.ini: {e}"}
+    logger.info("Report delivery settings updated (schedule=%s, recipients=%s, scope=%s)",
+                schedule, recipients or "—", scope or "all")
     return {"ok": True}
 
-@app.post("/api/settings/email/test")
-async def api_test_email(data: dict):
-    host = (data.get("host") or "").strip() or get_setting("smtp_host", "")
-    port_s = (data.get("port") or "").strip() or get_setting("smtp_port", "587")
-    username = (data.get("username") or "").strip() or get_setting("smtp_username", "")
-    password = (data.get("password") or "").strip() or get_setting("smtp_password", "")
-    from_addr = (data.get("from_addr") or "").strip() or get_setting("smtp_from", "") or username
-    to_addr = (data.get("to") or "").strip()
-    if not host or not username or not password:
-        return {"ok": False, "error": "Host, username, and password required"}
-    if not to_addr:
-        return {"ok": False, "error": "Enter a test recipient address"}
+def _resolve_time_range(key: str):
+    """Convert a time_range enum into (start_epoch, end_epoch) seconds."""
+    import time as _time
+    from datetime import datetime, timedelta
+    now = _time.time()
+    if key == "trailing_24h":
+        return int(now - 86400), int(now)
+    if key == "trailing_30d":
+        return int(now - 30 * 86400), int(now)
+    if key == "prev_week_mon_fri":
+        today = datetime.now()
+        # weekday(): Mon=0 ... Sun=6. Walk back to the most recent completed Friday.
+        days_since_fri = (today.weekday() - 4) % 7
+        if days_since_fri == 0 and today.hour < 23:
+            days_since_fri = 7
+        fri = today - timedelta(days=days_since_fri)
+        fri_eod = fri.replace(hour=23, minute=59, second=0, microsecond=0)
+        mon_sod = (fri - timedelta(days=4)).replace(hour=0, minute=0, second=0, microsecond=0)
+        return int(mon_sod.timestamp()), int(fri_eod.timestamp())
+    # default / "trailing_7d"
+    return int(now - 7 * 86400), int(now)
+
+def _run_scheduled_report():
+    """Generate the Lab Overview PDF using current delivery settings and drop it in REPORTS_DIR.
+    Prunes files older than REPORT_RETENTION_DAYS. Returns the output path on success.
+    Raises ReportError or other exceptions on failure — the caller should log them."""
+    import time as _time
+    _ensure_reports_dir()
+    time_range_key = get_setting("report_time_range", "trailing_7d")
+    scope          = get_setting("report_scope", "")
+    start, end     = _resolve_time_range(time_range_key)
+    pdf_bytes, _internal_name, pages, warnings = _generate_graph_report_pdf(start, end, scope)
+    ts = _time.strftime("%Y-%m-%dT%H%M", _time.localtime(end))
+    filename = f"lab_overview_{ts}.pdf"
+    out_path = _os.path.join(REPORTS_DIR, filename)
+    with open(out_path, "wb") as f:
+        f.write(pdf_bytes)
+    logger.info("Scheduled report written: %s (%d pages, %d warnings)", out_path, pages, len(warnings))
+    # Retention prune: drop PDFs older than N days.
+    cutoff = _time.time() - REPORT_RETENTION_DAYS * 86400
+    for fn in _os.listdir(REPORTS_DIR):
+        if not fn.startswith("lab_overview_") or not fn.endswith(".pdf"):
+            continue
+        fp = _os.path.join(REPORTS_DIR, fn)
+        try:
+            if _os.path.getmtime(fp) < cutoff:
+                _os.remove(fp)
+                logger.info("Pruned aged report: %s", fn)
+        except OSError:
+            pass
+    return out_path
+
+@app.post("/api/reports/generate_now")
+async def api_generate_report_now():
+    """Kick off an immediate report generation, writing the PDF into REPORTS_DIR.
+    Useful for verifying the scheduler pipeline without waiting for the cron time."""
     try:
-        port = int(port_s)
-    except ValueError:
-        return {"ok": False, "error": "Port must be a number"}
-    try:
-        await asyncio.get_event_loop().run_in_executor(
-            None, lambda: _send_smtp_email(
-                host, port, username, password, from_addr, [to_addr],
-                "COS Power Dashboard — test email",
-                "This is a test message from COS Power Dashboard.\n"
-                "If you received this, SMTP settings are working.\n",
-            ))
-        return {"ok": True}
-    except smtplib.SMTPAuthenticationError as e:
-        return {"ok": False, "error": f"Authentication failed: {e.smtp_error.decode('utf-8', 'ignore') if e.smtp_error else e}"}
+        path = await asyncio.get_event_loop().run_in_executor(None, _run_scheduled_report)
+        return {"ok": True, "filename": _os.path.basename(path)}
+    except ReportError as e:
+        return {"ok": False, "error": str(e)}
     except Exception as e:
+        logger.exception("Generate Now failed")
         return {"ok": False, "error": str(e)}
 
 @app.get("/api/reports/available")
@@ -1454,30 +1569,30 @@ def api_test_custom_reporting(data: dict):
         return {"ok": False, "error": f"Grafana error: {e}"}
     return {"ok": True, "prom_version": prom_version, "grafana_version": graf_version}
 
-@app.get("/api/reports/graph")
-def api_graph_report(start: int = 0, end: int = 0, clusters: str = ""):
-    """Generate the Graph Report PDF.
+class ReportError(Exception):
+    """Raised by _generate_graph_report_pdf when config/input is missing or invalid."""
 
-    Query params:
-      start, end  — unix epoch seconds (required, end > start)
-      clusters    — comma-separated cluster labels (e.g. "R1C2,R2C3"); empty = all
+def _generate_graph_report_pdf(start: int, end: int, clusters: str = ""):
+    """Render the Lab Overview Report PDF.
+
+    Args:
+      start, end  — unix epoch seconds, end > start
+      clusters    — comma-separated cluster labels; empty = all
+
+    Returns:
+      (pdf_bytes, filename, pages_written, warnings) tuple.
+    Raises ReportError on bad input or missing config.
     """
-    from fastapi.responses import Response, JSONResponse
     import io
     import time as _time
 
     if not start or not end or end <= start:
-        return JSONResponse({"ok": False, "error": "Invalid start/end (require unix seconds, end > start)"}, status_code=400)
+        raise ReportError("Invalid start/end (require unix seconds, end > start)")
 
     prom_url = get_setting("prom_url", "")
     grafana_url = get_setting("grafana_url", "")
-    grafana_user = get_setting("grafana_user", "")
-    grafana_pass = get_setting("grafana_pass", "")
     if not prom_url or not grafana_url:
-        return JSONResponse(
-            {"ok": False, "error": "Custom reporting not configured. Open Settings → Configure Custom Reporting."},
-            status_code=400,
-        )
+        raise ReportError("Custom reporting not configured. Open Settings → Configure Custom Reporting.")
 
     # Lazy matplotlib import so this module still loads on hosts without matplotlib.
     try:
@@ -1487,10 +1602,7 @@ def api_graph_report(start: int = 0, end: int = 0, clusters: str = ""):
         from matplotlib.backends.backend_pdf import PdfPages
         import matplotlib.dates as mdates
     except ImportError:
-        return JSONResponse(
-            {"ok": False, "error": "matplotlib not installed on this host. Run: pip install matplotlib"},
-            status_code=500,
-        )
+        raise ReportError("matplotlib not installed on this host. Run: pip install matplotlib")
 
     # Resolve cluster scope
     requested = [c.strip() for c in (clusters or "").split(",") if c.strip()]
@@ -1769,13 +1881,24 @@ def api_graph_report(start: int = 0, end: int = 0, clusters: str = ""):
     fn_start = _time.strftime("%Y-%m-%d_%H%M", _time.localtime(start))
     fn_end   = _time.strftime("%Y-%m-%d_%H%M", _time.localtime(end))
     filename = f"lab_overview_report_{fn_start}_to_{fn_end}.pdf"
+    return pdf_buf.getvalue(), filename, pages_written, warnings
+
+@app.get("/api/reports/graph")
+def api_graph_report(start: int = 0, end: int = 0, clusters: str = ""):
+    """Generate the Graph Report PDF and stream it back to the browser."""
+    from fastapi.responses import Response, JSONResponse
+    try:
+        pdf_bytes, filename, pages_written, warnings = _generate_graph_report_pdf(start, end, clusters)
+    except ReportError as e:
+        code = 500 if "matplotlib" in str(e) else 400
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=code)
     headers = {
         "Content-Disposition": f'inline; filename="{filename}"',
         "X-Report-Pages": str(pages_written),
     }
     if warnings:
         headers["X-Report-Warnings"] = "; ".join(warnings)[:500]
-    return Response(content=pdf_buf.getvalue(), media_type="application/pdf", headers=headers)
+    return Response(content=pdf_bytes, media_type="application/pdf", headers=headers)
 
 # ----------------------------
 # Systems API
@@ -2797,7 +2920,7 @@ def ui():
         <button onclick="openSlackDialog()" style="flex:1;padding:10px 14px;font-size:13px;background:rgba(37,99,235,0.3);color:#93c5fd;border:1px solid rgba(37,99,235,0.3);border-radius:10px;cursor:pointer;font-weight:700">Configure Slack</button>
       </div>
       <div style="margin-top:8px;display:flex;gap:8px">
-        <button onclick="openEmailDialog()" style="flex:1;padding:10px 14px;font-size:13px;background:rgba(37,99,235,0.3);color:#93c5fd;border:1px solid rgba(37,99,235,0.3);border-radius:10px;cursor:pointer;font-weight:700">Configure Email</button>
+        <button onclick="openReportDeliveryDialog()" style="flex:1;padding:10px 14px;font-size:13px;background:rgba(37,99,235,0.3);color:#93c5fd;border:1px solid rgba(37,99,235,0.3);border-radius:10px;cursor:pointer;font-weight:700">Configure Report Delivery</button>
       </div>
       <div class="row" style="margin-top:12px">
         <button class="primary" onclick="saveSettings()">Save</button>
@@ -2867,34 +2990,45 @@ def ui():
     </div>
   </div>
 
-  <!-- Email (SMTP) Configuration Modal -->
-  <div class="modal" id="emailModal">
+  <!-- Report Delivery Configuration Modal -->
+  <div class="modal" id="reportDeliveryModal">
     <div class="modal-content">
-      <h3>Configure Email</h3>
-      <div style="font-size:12px;color:rgba(148,163,184,0.85);margin-bottom:10px">SMTP server used for automated report delivery. For Gmail / Google Workspace, use <code>smtp.gmail.com</code> port <code>587</code> and a 16-character App Password (not your account password).</div>
-      <div style="margin-bottom:4px"><span style="color:#cbd5e1;font-weight:600">SMTP Server:</span></div>
-      <div style="display:flex;gap:8px;margin-bottom:8px">
-        <input id="smtpHost" placeholder="smtp.gmail.com" style="flex:3;margin-bottom:0" />
-        <input id="smtpPort" placeholder="587" style="flex:1;margin-bottom:0" />
+      <h3>Configure Report Delivery</h3>
+      <div style="font-size:12px;color:rgba(148,163,184,0.85);margin-bottom:10px">
+        The dashboard generates the Lab Overview Report on a schedule and drops the PDF into <code>reports/</code>.
+        The companion <strong>mailer</strong> app (see <code>mailer/</code> in this repo) runs outside the grey network, fetches the PDFs, and emails them to the recipients below.
       </div>
-      <div style="margin-bottom:4px"><span style="color:#cbd5e1;font-weight:600">Credentials:</span></div>
-      <div style="display:flex;gap:8px;margin-bottom:8px">
-        <input id="smtpUser" placeholder="Username (full email address)" style="flex:1;margin-bottom:0" />
-        <input id="smtpPass" type="password" placeholder="App password" style="flex:1;margin-bottom:0" />
+
+      <div style="margin-bottom:4px"><span style="color:#cbd5e1;font-weight:600">Recipients:</span> <span style="font-size:11px;color:rgba(148,163,184,0.7);font-weight:400">(comma-separated)</span></div>
+      <input id="rdRecipients" placeholder="you@signal65.com, teammate@signal65.com" style="margin-bottom:10px" />
+
+      <div style="margin-bottom:4px"><span style="color:#cbd5e1;font-weight:600">Schedule:</span></div>
+      <select id="rdSchedule" style="margin-bottom:10px;width:100%;padding:8px;border-radius:8px;background:rgba(15,23,42,0.6);color:#e5e7eb;border:1px solid rgba(148,163,184,0.3)"></select>
+
+      <div style="margin-bottom:4px"><span style="color:#cbd5e1;font-weight:600">Time Range for Each Report:</span></div>
+      <select id="rdTimeRange" style="margin-bottom:10px;width:100%;padding:8px;border-radius:8px;background:rgba(15,23,42,0.6);color:#e5e7eb;border:1px solid rgba(148,163,184,0.3)"></select>
+
+      <div style="margin-bottom:4px"><span style="color:#cbd5e1;font-weight:600">Scope:</span> <span style="font-size:11px;color:rgba(148,163,184,0.7);font-weight:400">(comma-separated cluster labels, e.g. R1C2,R2C3 — blank = all)</span></div>
+      <input id="rdScope" placeholder="leave blank for all clusters" style="margin-bottom:10px" />
+
+      <div style="margin-bottom:4px"><span style="color:#cbd5e1;font-weight:600">Email Subject Template:</span> <span style="font-size:11px;color:rgba(148,163,184,0.7);font-weight:400">(<code>{start}</code> and <code>{end}</code> are replaced with the report window)</span></div>
+      <input id="rdSubject" placeholder="COS Lab Weekly Power Report — {start} to {end}" style="margin-bottom:10px" />
+
+      <div style="margin-bottom:4px"><span style="color:#cbd5e1;font-weight:600">Sender Label:</span> <span style="font-size:11px;color:rgba(148,163,184,0.7);font-weight:400">(friendly From name the mailer shows)</span></div>
+      <input id="rdSenderLabel" placeholder="COS Power Dashboard" style="margin-bottom:12px" />
+
+      <div style="border-top:1px solid rgba(255,255,255,0.08);padding-top:10px;margin-bottom:4px">
+        <span style="color:#cbd5e1;font-weight:600">Test the pipeline:</span>
+        <span style="font-size:11px;color:rgba(148,163,184,0.7);font-weight:400">(generates one PDF in <code>reports/</code> right now using the values above — save first)</span>
       </div>
-      <div style="margin-bottom:4px"><span style="color:#cbd5e1;font-weight:600">From Address:</span> <span style="font-size:11px;color:rgba(148,163,184,0.7);font-weight:400">(defaults to username)</span></div>
-      <input id="smtpFrom" placeholder="coslabs@signal65.com" style="margin-bottom:8px" />
-      <div style="margin-bottom:4px"><span style="color:#cbd5e1;font-weight:600">Default Recipients:</span> <span style="font-size:11px;color:rgba(148,163,184,0.7);font-weight:400">(comma-separated, used for scheduled reports)</span></div>
-      <input id="smtpRecipients" placeholder="you@signal65.com, teammate@signal65.com" style="margin-bottom:12px" />
-      <div style="border-top:1px solid rgba(255,255,255,0.08);padding-top:10px;margin-bottom:4px"><span style="color:#cbd5e1;font-weight:600">Send a test message to:</span></div>
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
-        <input id="smtpTestTo" placeholder="you@signal65.com" style="flex:1;margin-bottom:0" />
-        <button onclick="testEmail()" style="white-space:nowrap;padding:10px 14px;font-size:13px;background:rgba(37,99,235,0.3);color:#93c5fd;border:1px solid rgba(37,99,235,0.3);border-radius:10px;cursor:pointer;font-weight:700">Send Test</button>
+        <button onclick="generateReportNow()" style="white-space:nowrap;padding:10px 14px;font-size:13px;background:rgba(37,99,235,0.3);color:#93c5fd;border:1px solid rgba(37,99,235,0.3);border-radius:10px;cursor:pointer;font-weight:700">Generate Now</button>
+        <span id="rdGenResult" style="font-size:13px;font-weight:700"></span>
       </div>
-      <div id="smtpTestResult" style="font-size:13px;font-weight:700;min-height:0;margin-bottom:8px"></div>
+
       <div class="row" style="margin-top:12px">
-        <button class="primary" onclick="saveEmailDialog()">Save</button>
-        <button onclick="closeEmailDialog()">Cancel</button>
+        <button class="primary" onclick="saveReportDeliveryDialog()">Save</button>
+        <button onclick="closeReportDeliveryDialog()">Cancel</button>
       </div>
     </div>
   </div>
@@ -4314,75 +4448,86 @@ def ui():
     closeSlackDialog();
   }
 
-  // ---------------- Email (SMTP) Configuration ----------------
-  async function openEmailDialog() {
-    let s = {host:"", port:"587", username:"", from_addr:"", recipients:"", has_password:false};
+  // ---------------- Report Delivery Configuration ----------------
+  async function openReportDeliveryDialog() {
+    let s = {recipients:"", schedule:"disabled", scope:"", time_range:"trailing_7d",
+             subject_template:"", sender_label:"", schedule_options:{}, time_range_options:{}};
     try {
-      const r = await fetch("/api/settings/email");
+      const r = await fetch("/api/settings/report_delivery");
       const d = await r.json();
       if (d && d.ok) s = Object.assign(s, d);
     } catch(e) {}
-    document.getElementById("smtpHost").value = s.host || "";
-    document.getElementById("smtpPort").value = s.port || "587";
-    document.getElementById("smtpUser").value = s.username || "";
-    document.getElementById("smtpFrom").value = s.from_addr || "";
-    document.getElementById("smtpRecipients").value = s.recipients || "";
-    const passEl = document.getElementById("smtpPass");
-    passEl.value = s.has_password ? "********" : "";
-    passEl.dataset.unchanged = s.has_password ? "true" : "false";
-    passEl.addEventListener("focus", function onFocus() {
-      if (passEl.dataset.unchanged === "true") { passEl.value = ""; passEl.dataset.unchanged = "false"; }
-    }, {once:true});
-    document.getElementById("smtpTestTo").value = "";
-    document.getElementById("smtpTestResult").textContent = "";
-    document.getElementById("emailModal").style.display = "flex";
+    // Populate the two dropdowns from server-provided option maps.
+    const schedSel = document.getElementById("rdSchedule");
+    schedSel.innerHTML = "";
+    Object.entries(s.schedule_options || {}).forEach(([k, label]) => {
+      const opt = document.createElement("option");
+      opt.value = k; opt.textContent = label;
+      if (k === s.schedule) opt.selected = true;
+      schedSel.appendChild(opt);
+    });
+    const trSel = document.getElementById("rdTimeRange");
+    trSel.innerHTML = "";
+    Object.entries(s.time_range_options || {}).forEach(([k, label]) => {
+      const opt = document.createElement("option");
+      opt.value = k; opt.textContent = label;
+      if (k === s.time_range) opt.selected = true;
+      trSel.appendChild(opt);
+    });
+    document.getElementById("rdRecipients").value = s.recipients || "";
+    document.getElementById("rdScope").value = s.scope || "";
+    document.getElementById("rdSubject").value = s.subject_template || "";
+    document.getElementById("rdSenderLabel").value = s.sender_label || "";
+    document.getElementById("rdGenResult").textContent = "";
+    document.getElementById("reportDeliveryModal").style.display = "flex";
   }
 
-  function closeEmailDialog() { document.getElementById("emailModal").style.display = "none"; }
+  function closeReportDeliveryDialog() {
+    document.getElementById("reportDeliveryModal").style.display = "none";
+  }
 
-  function _emailFormBody(extra) {
-    const passEl = document.getElementById("smtpPass");
-    const body = {
-      host: document.getElementById("smtpHost").value.trim(),
-      port: document.getElementById("smtpPort").value.trim(),
-      username: document.getElementById("smtpUser").value.trim(),
-      from_addr: document.getElementById("smtpFrom").value.trim(),
-      recipients: document.getElementById("smtpRecipients").value.trim(),
+  function _reportDeliveryBody() {
+    return {
+      recipients: document.getElementById("rdRecipients").value.trim(),
+      schedule: document.getElementById("rdSchedule").value,
+      time_range: document.getElementById("rdTimeRange").value,
+      scope: document.getElementById("rdScope").value.trim(),
+      subject_template: document.getElementById("rdSubject").value.trim(),
+      sender_label: document.getElementById("rdSenderLabel").value.trim(),
     };
-    if (passEl.dataset.unchanged !== "true") body.password = passEl.value.trim();
-    return Object.assign(body, extra || {});
   }
 
-  async function testEmail() {
-    const to = document.getElementById("smtpTestTo").value.trim();
-    const result = document.getElementById("smtpTestResult");
-    if (!to) { result.textContent = "Enter a test recipient address"; result.style.color = "#f87171"; return; }
-    result.textContent = "Sending..."; result.style.color = "#94a3b8";
+  async function saveReportDeliveryDialog() {
+    const result = document.getElementById("rdGenResult");
     try {
-      const res = await fetch("/api/settings/email/test", {
+      const res = await fetch("/api/settings/report_delivery", {
         method:"POST", headers:{"Content-Type":"application/json"},
-        body: JSON.stringify(_emailFormBody({to: to}))
+        body: JSON.stringify(_reportDeliveryBody())
       });
       const data = await res.json();
-      if (data.ok) { result.textContent = "Sent! Check " + to; result.style.color = "#22c55e"; }
-      else { result.textContent = data.error || "Failed"; result.style.color = "#f87171"; }
-    } catch(e) { result.textContent = "Test failed"; result.style.color = "#f87171"; }
-  }
-
-  async function saveEmailDialog() {
-    try {
-      const res = await fetch("/api/settings/email", {
-        method:"POST", headers:{"Content-Type":"application/json"},
-        body: JSON.stringify(_emailFormBody())
-      });
-      const data = await res.json();
-      if (data && data.ok) { closeEmailDialog(); return; }
-      const result = document.getElementById("smtpTestResult");
+      if (data && data.ok) { closeReportDeliveryDialog(); return; }
       result.textContent = (data && data.error) || "Save failed";
       result.style.color = "#f87171";
     } catch(e) {
-      const result = document.getElementById("smtpTestResult");
       result.textContent = "Save failed"; result.style.color = "#f87171";
+    }
+  }
+
+  async function generateReportNow() {
+    const result = document.getElementById("rdGenResult");
+    result.textContent = "Generating... (can take 30–90s)"; result.style.color = "#94a3b8";
+    try {
+      const res = await fetch("/api/reports/generate_now", {method:"POST"});
+      const data = await res.json();
+      if (data && data.ok) {
+        result.textContent = "Wrote " + data.filename;
+        result.style.color = "#22c55e";
+      } else {
+        result.textContent = (data && data.error) || "Generate failed";
+        result.style.color = "#f87171";
+      }
+    } catch(e) {
+      result.textContent = "Generate failed"; result.style.color = "#f87171";
     }
   }
 

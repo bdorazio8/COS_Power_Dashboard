@@ -3,3 +3,7 @@ __pycache__/
 *.pyc
 powerdash.db
 *.log
+
+reports/*.pdf
+reports/config.ini
+reports/sent.log
