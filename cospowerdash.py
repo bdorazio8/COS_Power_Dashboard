@@ -1,9 +1,12 @@
 import asyncio
 import json
 import logging
+import smtplib
 import sqlite3
+import ssl
 import subprocess
 import urllib3
+from email.message import EmailMessage
 from logging.handlers import RotatingFileHandler
 from typing import Dict, Set, List, Optional
 
@@ -1123,6 +1126,92 @@ async def api_test_slack(data: dict):
         if resp.status_code == 200:
             return {"ok": True}
         return {"ok": False, "error": f"Slack returned {resp.status_code}"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+# ----------------------------
+# Email (SMTP) Settings API
+# ----------------------------
+
+def _send_smtp_email(host: str, port: int, username: str, password: str,
+                     from_addr: str, to_addrs: List[str], subject: str, body: str) -> None:
+    """Send a plain-text email via SMTP + STARTTLS. Raises on failure."""
+    msg = EmailMessage()
+    msg["From"] = from_addr
+    msg["To"] = ", ".join(to_addrs)
+    msg["Subject"] = subject
+    msg.set_content(body)
+    ctx = ssl.create_default_context()
+    with smtplib.SMTP(host, port, timeout=20) as s:
+        s.ehlo()
+        s.starttls(context=ctx)
+        s.ehlo()
+        s.login(username, password)
+        s.send_message(msg)
+
+@app.get("/api/settings/email")
+def api_get_email_settings():
+    return {
+        "ok": True,
+        "host": get_setting("smtp_host", ""),
+        "port": get_setting("smtp_port", "587"),
+        "username": get_setting("smtp_username", ""),
+        "from_addr": get_setting("smtp_from", ""),
+        "recipients": get_setting("smtp_recipients", ""),
+        "has_password": bool(get_setting("smtp_password", "")),
+    }
+
+@app.post("/api/settings/email")
+def api_set_email_settings(data: dict):
+    host = (data.get("host") or "").strip()
+    port = (data.get("port") or "").strip() or "587"
+    username = (data.get("username") or "").strip()
+    password = (data.get("password") or "").strip()
+    from_addr = (data.get("from_addr") or "").strip() or username
+    recipients = (data.get("recipients") or "").strip()
+    if not host or not username:
+        return {"ok": False, "error": "Host and username are required"}
+    try:
+        int(port)
+    except ValueError:
+        return {"ok": False, "error": "Port must be a number"}
+    set_setting("smtp_host", host)
+    set_setting("smtp_port", port)
+    set_setting("smtp_username", username)
+    set_setting("smtp_from", from_addr)
+    set_setting("smtp_recipients", recipients)
+    if password:
+        set_setting("smtp_password", password)
+    logger.info("SMTP settings updated (host=%s, user=%s)", host, username)
+    return {"ok": True}
+
+@app.post("/api/settings/email/test")
+async def api_test_email(data: dict):
+    host = (data.get("host") or "").strip() or get_setting("smtp_host", "")
+    port_s = (data.get("port") or "").strip() or get_setting("smtp_port", "587")
+    username = (data.get("username") or "").strip() or get_setting("smtp_username", "")
+    password = (data.get("password") or "").strip() or get_setting("smtp_password", "")
+    from_addr = (data.get("from_addr") or "").strip() or get_setting("smtp_from", "") or username
+    to_addr = (data.get("to") or "").strip()
+    if not host or not username or not password:
+        return {"ok": False, "error": "Host, username, and password required"}
+    if not to_addr:
+        return {"ok": False, "error": "Enter a test recipient address"}
+    try:
+        port = int(port_s)
+    except ValueError:
+        return {"ok": False, "error": "Port must be a number"}
+    try:
+        await asyncio.get_event_loop().run_in_executor(
+            None, lambda: _send_smtp_email(
+                host, port, username, password, from_addr, [to_addr],
+                "COS Power Dashboard — test email",
+                "This is a test message from COS Power Dashboard.\n"
+                "If you received this, SMTP settings are working.\n",
+            ))
+        return {"ok": True}
+    except smtplib.SMTPAuthenticationError as e:
+        return {"ok": False, "error": f"Authentication failed: {e.smtp_error.decode('utf-8', 'ignore') if e.smtp_error else e}"}
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
@@ -2707,6 +2796,9 @@ def ui():
         <button onclick="openCustomReportingDialog()" style="flex:1;padding:10px 14px;font-size:13px;background:rgba(37,99,235,0.3);color:#93c5fd;border:1px solid rgba(37,99,235,0.3);border-radius:10px;cursor:pointer;font-weight:700">Configure Custom Reporting</button>
         <button onclick="openSlackDialog()" style="flex:1;padding:10px 14px;font-size:13px;background:rgba(37,99,235,0.3);color:#93c5fd;border:1px solid rgba(37,99,235,0.3);border-radius:10px;cursor:pointer;font-weight:700">Configure Slack</button>
       </div>
+      <div style="margin-top:8px;display:flex;gap:8px">
+        <button onclick="openEmailDialog()" style="flex:1;padding:10px 14px;font-size:13px;background:rgba(37,99,235,0.3);color:#93c5fd;border:1px solid rgba(37,99,235,0.3);border-radius:10px;cursor:pointer;font-weight:700">Configure Email</button>
+      </div>
       <div class="row" style="margin-top:12px">
         <button class="primary" onclick="saveSettings()">Save</button>
         <button onclick="closeSettings()">Cancel</button>
@@ -2771,6 +2863,38 @@ def ui():
       <div class="row" style="margin-top:12px">
         <button class="primary" onclick="saveSlackDialog()">Save</button>
         <button onclick="closeSlackDialog()">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Email (SMTP) Configuration Modal -->
+  <div class="modal" id="emailModal">
+    <div class="modal-content">
+      <h3>Configure Email</h3>
+      <div style="font-size:12px;color:rgba(148,163,184,0.85);margin-bottom:10px">SMTP server used for automated report delivery. For Gmail / Google Workspace, use <code>smtp.gmail.com</code> port <code>587</code> and a 16-character App Password (not your account password).</div>
+      <div style="margin-bottom:4px"><span style="color:#cbd5e1;font-weight:600">SMTP Server:</span></div>
+      <div style="display:flex;gap:8px;margin-bottom:8px">
+        <input id="smtpHost" placeholder="smtp.gmail.com" style="flex:3;margin-bottom:0" />
+        <input id="smtpPort" placeholder="587" style="flex:1;margin-bottom:0" />
+      </div>
+      <div style="margin-bottom:4px"><span style="color:#cbd5e1;font-weight:600">Credentials:</span></div>
+      <div style="display:flex;gap:8px;margin-bottom:8px">
+        <input id="smtpUser" placeholder="Username (full email address)" style="flex:1;margin-bottom:0" />
+        <input id="smtpPass" type="password" placeholder="App password" style="flex:1;margin-bottom:0" />
+      </div>
+      <div style="margin-bottom:4px"><span style="color:#cbd5e1;font-weight:600">From Address:</span> <span style="font-size:11px;color:rgba(148,163,184,0.7);font-weight:400">(defaults to username)</span></div>
+      <input id="smtpFrom" placeholder="coslabs@signal65.com" style="margin-bottom:8px" />
+      <div style="margin-bottom:4px"><span style="color:#cbd5e1;font-weight:600">Default Recipients:</span> <span style="font-size:11px;color:rgba(148,163,184,0.7);font-weight:400">(comma-separated, used for scheduled reports)</span></div>
+      <input id="smtpRecipients" placeholder="you@signal65.com, teammate@signal65.com" style="margin-bottom:12px" />
+      <div style="border-top:1px solid rgba(255,255,255,0.08);padding-top:10px;margin-bottom:4px"><span style="color:#cbd5e1;font-weight:600">Send a test message to:</span></div>
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+        <input id="smtpTestTo" placeholder="you@signal65.com" style="flex:1;margin-bottom:0" />
+        <button onclick="testEmail()" style="white-space:nowrap;padding:10px 14px;font-size:13px;background:rgba(37,99,235,0.3);color:#93c5fd;border:1px solid rgba(37,99,235,0.3);border-radius:10px;cursor:pointer;font-weight:700">Send Test</button>
+      </div>
+      <div id="smtpTestResult" style="font-size:13px;font-weight:700;min-height:0;margin-bottom:8px"></div>
+      <div class="row" style="margin-top:12px">
+        <button class="primary" onclick="saveEmailDialog()">Save</button>
+        <button onclick="closeEmailDialog()">Cancel</button>
       </div>
     </div>
   </div>
@@ -4188,6 +4312,78 @@ def ui():
       });
     } catch(e) {}
     closeSlackDialog();
+  }
+
+  // ---------------- Email (SMTP) Configuration ----------------
+  async function openEmailDialog() {
+    let s = {host:"", port:"587", username:"", from_addr:"", recipients:"", has_password:false};
+    try {
+      const r = await fetch("/api/settings/email");
+      const d = await r.json();
+      if (d && d.ok) s = Object.assign(s, d);
+    } catch(e) {}
+    document.getElementById("smtpHost").value = s.host || "";
+    document.getElementById("smtpPort").value = s.port || "587";
+    document.getElementById("smtpUser").value = s.username || "";
+    document.getElementById("smtpFrom").value = s.from_addr || "";
+    document.getElementById("smtpRecipients").value = s.recipients || "";
+    const passEl = document.getElementById("smtpPass");
+    passEl.value = s.has_password ? "********" : "";
+    passEl.dataset.unchanged = s.has_password ? "true" : "false";
+    passEl.addEventListener("focus", function onFocus() {
+      if (passEl.dataset.unchanged === "true") { passEl.value = ""; passEl.dataset.unchanged = "false"; }
+    }, {once:true});
+    document.getElementById("smtpTestTo").value = "";
+    document.getElementById("smtpTestResult").textContent = "";
+    document.getElementById("emailModal").style.display = "flex";
+  }
+
+  function closeEmailDialog() { document.getElementById("emailModal").style.display = "none"; }
+
+  function _emailFormBody(extra) {
+    const passEl = document.getElementById("smtpPass");
+    const body = {
+      host: document.getElementById("smtpHost").value.trim(),
+      port: document.getElementById("smtpPort").value.trim(),
+      username: document.getElementById("smtpUser").value.trim(),
+      from_addr: document.getElementById("smtpFrom").value.trim(),
+      recipients: document.getElementById("smtpRecipients").value.trim(),
+    };
+    if (passEl.dataset.unchanged !== "true") body.password = passEl.value.trim();
+    return Object.assign(body, extra || {});
+  }
+
+  async function testEmail() {
+    const to = document.getElementById("smtpTestTo").value.trim();
+    const result = document.getElementById("smtpTestResult");
+    if (!to) { result.textContent = "Enter a test recipient address"; result.style.color = "#f87171"; return; }
+    result.textContent = "Sending..."; result.style.color = "#94a3b8";
+    try {
+      const res = await fetch("/api/settings/email/test", {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify(_emailFormBody({to: to}))
+      });
+      const data = await res.json();
+      if (data.ok) { result.textContent = "Sent! Check " + to; result.style.color = "#22c55e"; }
+      else { result.textContent = data.error || "Failed"; result.style.color = "#f87171"; }
+    } catch(e) { result.textContent = "Test failed"; result.style.color = "#f87171"; }
+  }
+
+  async function saveEmailDialog() {
+    try {
+      const res = await fetch("/api/settings/email", {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify(_emailFormBody())
+      });
+      const data = await res.json();
+      if (data && data.ok) { closeEmailDialog(); return; }
+      const result = document.getElementById("smtpTestResult");
+      result.textContent = (data && data.error) || "Save failed";
+      result.style.color = "#f87171";
+    } catch(e) {
+      const result = document.getElementById("smtpTestResult");
+      result.textContent = "Save failed"; result.style.color = "#f87171";
+    }
   }
 
   // ---------------- Reports ----------------
