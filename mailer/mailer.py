@@ -335,6 +335,16 @@ def _fmt_int(v, suffix=""):
         return str(v)
 
 
+def _sum_gpus(lab):
+    """Total GPU count across vendors (NV + AMD). Returns None only when both
+    sources are missing, so absence stays distinguishable from a real zero."""
+    nv = lab.get("nv_gpu_count")
+    amd = lab.get("amd_gpu_count")
+    if nv is None and amd is None:
+        return None
+    return (nv or 0) + (amd or 0)
+
+
 def render_text_body(meta):
     """Plain-text body for clients that can't render HTML, and as the spam-filter
     friendly sibling of the HTML alternative. Uses aligned ASCII for readability."""
@@ -358,7 +368,7 @@ def render_text_body(meta):
     lines.append(f"  Current lab power:         {_fmt_num(lab.get('kw_now'), ' kW')}")
     lines.append(f"  GPU energy in window:      {_fmt_num(lab.get('gpu_kwh'), ' kWh')}")
     lines.append(f"  Servers in scope:          {_fmt_int(lab.get('server_count'))}")
-    lines.append(f"  NVIDIA GPUs / AMD GPUs:    {_fmt_int(lab.get('nv_gpu_count'))} / {_fmt_int(lab.get('amd_gpu_count'))}")
+    lines.append(f"  GPUs:                      {_fmt_int(_sum_gpus(lab))}")
     lines.append("")
     if top_srv:
         lines.append("TOP SERVERS BY ENERGY")
@@ -408,7 +418,7 @@ def render_html_body(meta):
         ("Current Load",  _fmt_num(lab.get("kw_now"), " kW")),
         ("GPU Energy",    _fmt_num(lab.get("gpu_kwh"), " kWh")),
         ("Servers",       _fmt_int(lab.get("server_count"))),
-        ("GPUs (NV / AMD)", f"{_fmt_int(lab.get('nv_gpu_count'))} / {_fmt_int(lab.get('amd_gpu_count'))}"),
+        ("GPUs",          _fmt_int(_sum_gpus(lab))),
     ]
     card_rows_html = ""
     for i in range(0, len(stat_cards), 2):
