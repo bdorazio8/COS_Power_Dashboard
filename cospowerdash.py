@@ -3551,7 +3551,7 @@ def ui():
 
   function loadColorClass(pct) {
     if (pct >= 85) return "red";
-    if (pct >= 70) return "amber";
+    if (pct >= 75) return "amber";
     return "green";
   }
 
