@@ -257,6 +257,30 @@ def init_db():
     """)
     conn.commit()
 
+    # Panes — groups of racks that cycle on the dashboard. A single default
+    # pane (id=1, "Main") always exists. Adding a pane_id column to racks
+    # migrates every existing rack into the default pane on first run.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS panes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            order_index INTEGER NOT NULL DEFAULT 0
+        )
+    """)
+    conn.commit()
+    cur.execute("SELECT COUNT(*) FROM panes WHERE id=1")
+    if cur.fetchone()[0] == 0:
+        cur.execute("INSERT INTO panes(id, name, order_index) VALUES(1, 'Main', 0)")
+        conn.commit()
+
+    cur.execute("PRAGMA table_info(racks)")
+    cols = [row[1] for row in cur.fetchall()]
+    if "pane_id" not in cols:
+        cur.execute("ALTER TABLE racks ADD COLUMN pane_id INTEGER NOT NULL DEFAULT 1")
+        conn.commit()
+        cur.execute("UPDATE racks SET pane_id=1 WHERE pane_id IS NULL")
+        conn.commit()
+
     cur.execute("SELECT value FROM settings WHERE key='dashboard_title'")
     row = cur.fetchone()
     if not row:
@@ -293,36 +317,36 @@ def get_racks():
     conn = _connect()
     cur = conn.cursor()
     cur.execute("""
-        SELECT id,label,COALESCE(sort_order,id),COALESCE(pdu_ip,''),COALESCE(pdu2_ip,'')
+        SELECT id,label,COALESCE(sort_order,id),COALESCE(pdu_ip,''),COALESCE(pdu2_ip,''),COALESCE(pane_id,1)
         FROM racks
         ORDER BY COALESCE(sort_order,id), id
     """)
     rows = cur.fetchall()
     conn.close()
-    return [{"id": r[0], "label": r[1], "sort_order": r[2], "pdu_ip": r[3], "pdu2_ip": r[4]} for r in rows]
+    return [{"id": r[0], "label": r[1], "sort_order": r[2], "pdu_ip": r[3], "pdu2_ip": r[4], "pane_id": r[5]} for r in rows]
 
 def _next_sort_order(cur) -> int:
     cur.execute("SELECT COALESCE(MAX(sort_order), 0) FROM racks")
     row = cur.fetchone()
     return int(row[0] or 0) + 1
 
-def add_rack(label: str, pdu_ip: str = "", pdu2_ip: str = ""):
+def add_rack(label: str, pdu_ip: str = "", pdu2_ip: str = "", pane_id: int = 1):
     conn = _connect()
     cur = conn.cursor()
     next_order = _next_sort_order(cur)
     cur.execute(
-        "INSERT INTO racks(label, pdu_ip, community, sort_order, pdu2_ip) VALUES(?,?,?,?,?)",
-        (label, pdu_ip, SNMP_COMMUNITY, next_order, pdu2_ip),
+        "INSERT INTO racks(label, pdu_ip, community, sort_order, pdu2_ip, pane_id) VALUES(?,?,?,?,?,?)",
+        (label, pdu_ip, SNMP_COMMUNITY, next_order, pdu2_ip, pane_id),
     )
     conn.commit()
     conn.close()
 
-def update_rack(rack_id: int, label: str, pdu_ip: str, pdu2_ip: str = ""):
+def update_rack(rack_id: int, label: str, pdu_ip: str, pdu2_ip: str = "", pane_id: int = 1):
     conn = _connect()
     cur = conn.cursor()
     cur.execute(
-        "UPDATE racks SET label=?, pdu_ip=?, pdu2_ip=? WHERE id=?",
-        (label, pdu_ip, pdu2_ip, rack_id),
+        "UPDATE racks SET label=?, pdu_ip=?, pdu2_ip=?, pane_id=? WHERE id=?",
+        (label, pdu_ip, pdu2_ip, pane_id, rack_id),
     )
     conn.commit()
     conn.close()
@@ -902,6 +926,7 @@ class Rack(BaseModel):
     label: str
     pdu_ip: str
     pdu2_ip: str = ""
+    pane_id: int = 1
 
 class TitlePayload(BaseModel):
     title: str
@@ -923,10 +948,11 @@ def api_add_rack(r: Rack):
     label = (r.label or "").strip()
     pdu_ip = (r.pdu_ip or "").strip()
     pdu2_ip = (r.pdu2_ip or "").strip()
+    pane_id = int(r.pane_id or 1)
     if not label:
         return {"ok": False, "error": "Missing label"}
-    add_rack(label, pdu_ip, pdu2_ip)
-    logger.info("Rack added: %s (Left %s, Right %s)", label, pdu_ip or "none", pdu2_ip or "none")
+    add_rack(label, pdu_ip, pdu2_ip, pane_id)
+    logger.info("Rack added: %s (Left %s, Right %s, pane %d)", label, pdu_ip or "none", pdu2_ip or "none", pane_id)
     return {"ok": True}
 
 @app.post("/api/racks/update")
@@ -935,11 +961,119 @@ def api_update_rack(data: dict):
     label = (data.get("label") or "").strip()
     pdu_ip = (data.get("pdu_ip") or "").strip()
     pdu2_ip = (data.get("pdu2_ip") or "").strip()
+    try:
+        pane_id = int(data.get("pane_id") or 1)
+    except (TypeError, ValueError):
+        pane_id = 1
     if not rack_id or not label:
         return {"ok": False, "error": "Missing id or label"}
-    update_rack(int(rack_id), label, pdu_ip, pdu2_ip)
-    logger.info("Rack updated: id=%s %s (Left %s, Right %s)", rack_id, label, pdu_ip or "none", pdu2_ip or "none")
+    update_rack(int(rack_id), label, pdu_ip, pdu2_ip, pane_id)
+    logger.info("Rack updated: id=%s %s (Left %s, Right %s, pane %d)", rack_id, label, pdu_ip or "none", pdu2_ip or "none", pane_id)
     return {"ok": True}
+
+# ----------------------------
+# Panes API
+# ----------------------------
+
+@app.get("/api/panes")
+def api_list_panes():
+    conn = _connect()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT p.id, p.name, COALESCE(p.order_index, p.id),
+               (SELECT COUNT(*) FROM racks WHERE pane_id = p.id)
+        FROM panes p
+        ORDER BY COALESCE(p.order_index, p.id), p.id
+    """)
+    rows = cur.fetchall()
+    conn.close()
+    cycle_s = 0
+    try:
+        cycle_s = int(get_setting("pane_cycle_seconds", "0") or "0")
+    except ValueError:
+        cycle_s = 0
+    return {
+        "ok": True,
+        "panes": [{"id": r[0], "name": r[1], "order_index": r[2], "rack_count": r[3]} for r in rows],
+        "cycle_seconds": cycle_s,
+    }
+
+@app.post("/api/panes")
+def api_create_pane(data: dict):
+    name = (data.get("name") or "").strip()
+    if not name:
+        return {"ok": False, "error": "Name required"}
+    conn = _connect()
+    cur = conn.cursor()
+    cur.execute("SELECT COALESCE(MAX(order_index), 0) + 1 FROM panes")
+    next_order = int(cur.fetchone()[0] or 1)
+    cur.execute("INSERT INTO panes(name, order_index) VALUES(?, ?)", (name, next_order))
+    pane_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    logger.info("Pane created: %s (id=%d)", name, pane_id)
+    return {"ok": True, "id": pane_id, "name": name}
+
+@app.post("/api/panes/rename")
+def api_rename_pane(data: dict):
+    pid = data.get("id")
+    name = (data.get("name") or "").strip()
+    if not pid or not name:
+        return {"ok": False, "error": "Missing id or name"}
+    conn = _connect()
+    cur = conn.cursor()
+    cur.execute("UPDATE panes SET name=? WHERE id=?", (name, int(pid)))
+    conn.commit()
+    conn.close()
+    logger.info("Pane renamed: id=%s → %s", pid, name)
+    return {"ok": True}
+
+@app.post("/api/panes/order")
+def api_reorder_panes(data: dict):
+    ids = data.get("ids") or []
+    try:
+        ids_int = [int(x) for x in ids]
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "Invalid ids"}
+    conn = _connect()
+    cur = conn.cursor()
+    for i, pid in enumerate(ids_int):
+        cur.execute("UPDATE panes SET order_index=? WHERE id=?", (i + 1, pid))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+@app.post("/api/panes/delete")
+def api_delete_pane(data: dict):
+    pid = data.get("id")
+    if not pid:
+        return {"ok": False, "error": "Missing id"}
+    pid = int(pid)
+    if pid == 1:
+        return {"ok": False, "error": "The default pane cannot be deleted"}
+    conn = _connect()
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM racks WHERE pane_id=?", (pid,))
+    rack_count = int(cur.fetchone()[0] or 0)
+    if rack_count > 0:
+        conn.close()
+        return {"ok": False, "error": f"Move or delete the {rack_count} rack(s) in this pane first"}
+    cur.execute("DELETE FROM panes WHERE id=?", (pid,))
+    conn.commit()
+    conn.close()
+    logger.info("Pane deleted: id=%d", pid)
+    return {"ok": True}
+
+@app.post("/api/settings/pane_cycle_seconds")
+def api_set_pane_cycle_seconds(data: dict):
+    try:
+        secs = int(data.get("seconds") or 0)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "Seconds must be a whole number"}
+    if secs < 0 or secs > 3600:
+        return {"ok": False, "error": "Seconds must be between 0 and 3600"}
+    set_setting("pane_cycle_seconds", str(secs))
+    return {"ok": True, "seconds": secs}
 
 @app.post("/api/delete")
 def api_delete(data: dict):
@@ -2130,6 +2264,15 @@ def ui():
   .gear path { fill: rgba(226,232,240,0.92); }
 
   h2 { margin: 0 0 8px; font-size: clamp(22px, 2.2vw, 34px); }
+  .pane-label {
+    margin: -4px 0 10px;
+    text-align: center;
+    font-size: clamp(12px, 1.2vw, 18px);
+    color: #94a3b8;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    font-weight: 600;
+  }
   .subtle {
     font-size: clamp(12px, 1.1vw, 14px);
     opacity:0.7;
@@ -2823,6 +2966,16 @@ def ui():
 <body>
   <div class="page">
     <div class="top-icons">
+      <div class="icon-btn pane-nav" id="panePrevBtn" onclick="stepPane(-1)" title="Previous Pane" style="display:none">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <polyline points="14 6 8 12 14 18" fill="none" stroke="rgba(226,232,240,0.92)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </div>
+      <div class="icon-btn pane-nav" id="paneNextBtn" onclick="stepPane(1)" title="Next Pane" style="display:none">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <polyline points="10 6 16 12 10 18" fill="none" stroke="rgba(226,232,240,0.92)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </div>
       <div class="icon-btn" onclick="openAdd()" title="Add Rack">
         <svg viewBox="0 0 24 24" aria-hidden="true">
           <rect x="3" y="3" width="18" height="18" rx="4" ry="4" fill="none" stroke="rgba(226,232,240,0.92)" stroke-width="1.8"/>
@@ -2852,6 +3005,7 @@ def ui():
     </div>
 
     <h2 id="dashTitle">__TITLE__</h2>
+    <div id="paneLabel" class="pane-label" style="display:none"></div>
     <div class="rackArea">
       <div id="layoutBtn" class="layoutBtn" onclick="toggleEdit()" title="Edit Layout">
         <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -2885,6 +3039,9 @@ def ui():
         <div id="pdu2StatusText" class="status-text">Waiting for PDU…</div>
       </div>
 
+      <div style="margin:8px 0 4px"><span style="color:#cbd5e1;font-weight:600;font-size:13px">Pane:</span></div>
+      <select id="addPaneSelect" onchange="onPaneSelectChange(this, 'add')" style="width:100%;padding:10px;border-radius:10px;background:rgba(15,23,42,0.6);color:#e5e7eb;border:1px solid rgba(148,163,184,0.3);margin-bottom:8px"></select>
+
       <div id="addError" style="color:#f87171;font-weight:700;font-size:13px;min-height:18px;margin-bottom:4px"></div>
       <div class="row">
         <button id="applyBtn" class="primary disabled" disabled onclick="applyRack()">Apply</button>
@@ -2909,6 +3066,9 @@ def ui():
         <div id="editPdu2Light" class="status-light"></div>
         <div id="editPdu2StatusText" class="status-text">Waiting for PDU…</div>
       </div>
+
+      <div style="margin:8px 0 4px"><span style="color:#cbd5e1;font-weight:600;font-size:13px">Pane:</span></div>
+      <select id="editPaneSelect" onchange="onPaneSelectChange(this, 'edit')" style="width:100%;padding:10px;border-radius:10px;background:rgba(15,23,42,0.6);color:#e5e7eb;border:1px solid rgba(148,163,184,0.3);margin-bottom:8px"></select>
 
       <div style="margin-top:12px;border-top:1px solid rgba(255,255,255,0.08);padding-top:12px">
         <div style="margin-bottom:6px"><span style="color:#cbd5e1;font-weight:600">Servers (iDRAC):</span></div>
@@ -2972,6 +3132,14 @@ def ui():
         <label style="cursor:pointer;white-space:nowrap"><input type="radio" name="pduViewStyle" value="horizontal" id="viewHorizontal" checked /> Horizontal</label>
         <label style="cursor:pointer;white-space:nowrap"><input type="radio" name="pduViewStyle" value="vertical" id="viewVertical" /> Vertical</label>
       </div>
+      <div style="margin-top:12px;display:flex;align-items:center;gap:12px">
+        <span style="color:#cbd5e1;font-weight:600;white-space:nowrap">Pane Cycle Interval:</span>
+        <input id="paneCycleInput" type="number" min="0" max="3600" step="1" style="width:80px;margin-bottom:0;padding:6px 8px" />
+        <span style="color:#94a3b8;font-size:12px">seconds (0 = disabled)</span>
+      </div>
+      <div style="margin-top:8px;display:flex;gap:8px">
+        <button onclick="openManagePanesDialog()" style="flex:1;padding:10px 14px;font-size:13px;background:rgba(37,99,235,0.3);color:#93c5fd;border:1px solid rgba(37,99,235,0.3);border-radius:10px;cursor:pointer;font-weight:700">Manage Panes</button>
+      </div>
       <div style="margin-top:16px;border-top:1px solid rgba(255,255,255,0.08);padding-top:12px;display:flex;gap:8px">
         <button onclick="openIdracDialog()" style="flex:1;padding:10px 14px;font-size:13px;background:rgba(37,99,235,0.3);color:#93c5fd;border:1px solid rgba(37,99,235,0.3);border-radius:10px;cursor:pointer;font-weight:700">Configure iDRAC</button>
         <button onclick="openOmeDialog()" style="flex:1;padding:10px 14px;font-size:13px;background:rgba(37,99,235,0.3);color:#93c5fd;border:1px solid rgba(37,99,235,0.3);border-radius:10px;cursor:pointer;font-weight:700">Configure OME</button>
@@ -2986,6 +3154,25 @@ def ui():
       <div class="row" style="margin-top:12px">
         <button class="primary" onclick="saveSettings()">Save</button>
         <button onclick="closeSettings()">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Manage Panes Modal -->
+  <div class="modal" id="managePanesModal">
+    <div class="modal-content">
+      <h3>Manage Panes</h3>
+      <div style="font-size:12px;color:rgba(148,163,184,0.85);margin-bottom:10px">
+        Rename, reorder, or delete panes. Deletion is only allowed when the pane has no racks — move or remove the racks first. The default <code>Main</code> pane cannot be deleted.
+      </div>
+      <div id="panesList" style="display:flex;flex-direction:column;gap:6px;margin-bottom:10px"></div>
+      <div style="display:flex;gap:8px;align-items:center;margin-top:6px">
+        <input id="newPaneName" placeholder="New pane name" style="flex:1;margin-bottom:0" />
+        <button onclick="createPaneFromManage()" style="white-space:nowrap;padding:10px 14px;font-size:13px;background:rgba(37,99,235,0.3);color:#93c5fd;border:1px solid rgba(37,99,235,0.3);border-radius:10px;cursor:pointer;font-weight:700">Create</button>
+      </div>
+      <div id="managePanesError" style="color:#f87171;font-weight:700;font-size:13px;min-height:16px;margin-top:6px"></div>
+      <div class="row" style="margin-top:12px">
+        <button onclick="closeManagePanesDialog()">Close</button>
       </div>
     </div>
   </div>
@@ -3271,6 +3458,77 @@ def ui():
     if (page && viewportStyle === "fill") page.style.maxWidth = "100%";
   })();
 
+  // ----------------------------- Panes -----------------------------
+  // Multi-pane state: dashboard can group racks into named panes and
+  // round-robin between them. All panes share the same view/layout
+  // settings; only the rack set changes per pane.
+  let panesCache = [{id: 1, name: "Main", order_index: 0, rack_count: 0}];
+  let currentPaneId = parseInt(localStorage.getItem("currentPaneId") || "1", 10) || 1;
+  let paneCycleSeconds = 0;
+  let paneCycleTimer = null;
+
+  async function loadPanes() {
+    try {
+      const r = await fetch("/api/panes");
+      const d = await r.json();
+      if (d && d.ok) {
+        panesCache = d.panes || [];
+        paneCycleSeconds = parseInt(d.cycle_seconds || 0, 10) || 0;
+        // If the current pane was deleted, fall back to the first pane
+        if (!panesCache.some(p => p.id === currentPaneId)) {
+          currentPaneId = (panesCache[0] && panesCache[0].id) || 1;
+          localStorage.setItem("currentPaneId", String(currentPaneId));
+        }
+        updatePaneNavUi();
+        restartCycleTimer();
+      }
+    } catch(e) { /* dashboard continues; just no pane awareness */ }
+  }
+
+  function updatePaneNavUi() {
+    const prev = document.getElementById("panePrevBtn");
+    const next = document.getElementById("paneNextBtn");
+    const label = document.getElementById("paneLabel");
+    const multi = panesCache.length > 1;
+    if (prev) prev.style.display = multi ? "" : "none";
+    if (next) next.style.display = multi ? "" : "none";
+    if (label) {
+      if (multi) {
+        const p = panesCache.find(x => x.id === currentPaneId) || panesCache[0];
+        label.textContent = p ? p.name : "";
+        label.style.display = "";
+      } else {
+        label.style.display = "none";
+      }
+    }
+  }
+
+  function stepPane(delta) {
+    if (panesCache.length <= 1) return;
+    const idx = panesCache.findIndex(p => p.id === currentPaneId);
+    const n = panesCache.length;
+    const nextIdx = ((idx < 0 ? 0 : idx) + delta + n) % n;
+    currentPaneId = panesCache[nextIdx].id;
+    localStorage.setItem("currentPaneId", String(currentPaneId));
+    updatePaneNavUi();
+    render(racksCache);
+    // Manual nav resets the cycle timer so the user gets a full interval
+    // on the pane they just jumped to.
+    restartCycleTimer();
+  }
+
+  function restartCycleTimer() {
+    if (paneCycleTimer) { clearInterval(paneCycleTimer); paneCycleTimer = null; }
+    if (paneCycleSeconds > 0 && panesCache.length > 1) {
+      paneCycleTimer = setInterval(() => stepPane(1), paneCycleSeconds * 1000);
+    }
+  }
+
+  function racksForCurrentPane(all) {
+    if (panesCache.length <= 1) return all;
+    return (all || []).filter(r => (r.pane_id || 1) === currentPaneId);
+  }
+
   ws.onmessage = (event) => {
     let incoming = [];
     try { incoming = JSON.parse(event.data) || []; } catch(e) { incoming = []; }
@@ -3336,15 +3594,17 @@ def ui():
   }
 
   window.addEventListener("resize", () => {
-    computeRackSize(racksCache.length);
+    const n = racksForCurrentPane(racksCache).length;
+    computeRackSize(n);
     // Second pass after layout settles to re-measure cqi-scaled chrome
-    requestAnimationFrame(() => computeRackSize(racksCache.length));
+    requestAnimationFrame(() => computeRackSize(n));
   });
 
   function render(racks) {
     let container = document.getElementById("racks");
     container.innerHTML = "";
 
+    racks = racksForCurrentPane(racks);
     racks = [...racks];
     computeRackSize(racks.length);
 
@@ -3701,6 +3961,52 @@ def ui():
   function openAdd() {
     document.getElementById("addModal").style.display = "flex";
     resetAddState(true);
+    populatePaneSelect("addPaneSelect", currentPaneId);
+  }
+
+  // Populate a <select> with existing panes + a "+ Create new pane…" option.
+  // Selected value stays on selectedId. After a create, the new pane becomes selected.
+  function populatePaneSelect(selectId, selectedId) {
+    const sel = document.getElementById(selectId);
+    if (!sel) return;
+    sel.innerHTML = "";
+    (panesCache || []).forEach(p => {
+      const opt = document.createElement("option");
+      opt.value = String(p.id); opt.textContent = p.name;
+      if (p.id === selectedId) opt.selected = true;
+      sel.appendChild(opt);
+    });
+    const createOpt = document.createElement("option");
+    createOpt.value = "__create__";
+    createOpt.textContent = "+ Create new pane…";
+    sel.appendChild(createOpt);
+  }
+
+  async function onPaneSelectChange(sel, which) {
+    if (sel.value !== "__create__") return;
+    const name = (window.prompt("Name for the new pane:") || "").trim();
+    if (!name) {
+      // Revert to first pane so we don't leave __create__ selected
+      sel.value = String(panesCache[0] ? panesCache[0].id : 1);
+      return;
+    }
+    try {
+      const res = await fetch("/api/panes", {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({name: name})
+      });
+      const data = await res.json();
+      if (!data || !data.ok) {
+        alert((data && data.error) || "Could not create pane");
+        sel.value = String(panesCache[0] ? panesCache[0].id : 1);
+        return;
+      }
+      await loadPanes();
+      populatePaneSelect(which === "edit" ? "editPaneSelect" : "addPaneSelect", data.id);
+    } catch(e) {
+      alert("Create failed");
+      sel.value = String(panesCache[0] ? panesCache[0].id : 1);
+    }
   }
   function closeAdd() {
     document.getElementById("addModal").style.display = "none";
@@ -3810,9 +4116,10 @@ def ui():
       const d = await r.json();
       if (d && d.ok && d.title) applyTitle(d.title);
     } catch(e) {}
+    await loadPanes();
     // viewportStyle and pduLoadStyle were already initialized synchronously
     // from localStorage at script start so the first paint is correct.
-    computeRackSize(racksCache.length);
+    computeRackSize(racksForCurrentPane(racksCache).length);
 
     // Single-backdrop dimming for stacked modals: when more than one modal
     // is visible, only the first (DOM-order) keeps its backdrop; the rest
@@ -3880,6 +4187,8 @@ def ui():
     const label = document.getElementById("label").value.trim();
     const pduIp = document.getElementById("pduIp").value.trim();
     const pdu2Ip = document.getElementById("pdu2Ip").value.trim();
+    const paneSel = document.getElementById("addPaneSelect");
+    const paneId = parseInt((paneSel && paneSel.value !== "__create__" ? paneSel.value : "1"), 10) || 1;
 
     const errEl = document.getElementById("addError");
     errEl.textContent = "";
@@ -3896,10 +4205,10 @@ def ui():
       const res = await fetch("/api/racks", {
         method:"POST",
         headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({label: label, pdu_ip: pduIp, pdu2_ip: pdu2Ip})
+        body: JSON.stringify({label: label, pdu_ip: pduIp, pdu2_ip: pdu2Ip, pane_id: paneId})
       });
       const data = await res.json();
-      if (data.ok) closeAdd();
+      if (data.ok) { closeAdd(); loadPanes(); }
       else {
         errEl.textContent = data.error || "Add failed";
         btn.disabled = false;
@@ -3927,6 +4236,7 @@ def ui():
     document.getElementById("editLabel").value = rack.label || "";
     document.getElementById("editPduIp").value = rack.pdu_ip || "";
     document.getElementById("editPdu2Ip").value = rack.pdu2_ip || "";
+    populatePaneSelect("editPaneSelect", rack.pane_id || 1);
     document.getElementById("editError").textContent = "";
 
     // Run checks on existing IPs — both start OK (empty is fine)
@@ -4038,6 +4348,8 @@ def ui():
     const label = document.getElementById("editLabel").value.trim();
     const pduIp = document.getElementById("editPduIp").value.trim();
     const pdu2Ip = document.getElementById("editPdu2Ip").value.trim();
+    const paneSel = document.getElementById("editPaneSelect");
+    const paneId = parseInt((paneSel && paneSel.value !== "__create__" ? paneSel.value : "1"), 10) || 1;
     const errEl = document.getElementById("editError");
     errEl.textContent = "";
 
@@ -4047,10 +4359,10 @@ def ui():
     try {
       const res = await fetch("/api/racks/update", {
         method:"POST", headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({id: editRackId, label: label, pdu_ip: pduIp, pdu2_ip: pdu2Ip})
+        body: JSON.stringify({id: editRackId, label: label, pdu_ip: pduIp, pdu2_ip: pdu2Ip, pane_id: paneId})
       });
       const data = await res.json();
-      if (data.ok) closeEdit();
+      if (data.ok) { closeEdit(); loadPanes(); }
       else { errEl.textContent = data.error || "Update failed"; btn.disabled = false; btn.classList.remove("disabled"); }
     } catch(e) { errEl.textContent = "Update failed"; btn.disabled = false; btn.classList.remove("disabled"); }
   }
@@ -4207,10 +4519,143 @@ def ui():
     document.getElementById(viewportStyle === "fill" ? "vpFill" : "vpRacks").checked = true;
     document.getElementById(pduLoadStyle === "inline" ? "loadInline" : "loadGrouped").checked = true;
     document.getElementById(pduViewStyle === "vertical" ? "viewVertical" : "viewHorizontal").checked = true;
+    document.getElementById("paneCycleInput").value = String(paneCycleSeconds || 0);
     setTimeout(() => document.getElementById("titleInput").focus(), 50);
   }
 
   function closeSettings() { document.getElementById("settingsModal").style.display = "none"; }
+
+  // ---------------- Manage Panes Dialog ----------------
+  function openManagePanesDialog() {
+    document.getElementById("managePanesError").textContent = "";
+    renderPanesList();
+    document.getElementById("managePanesModal").style.display = "flex";
+  }
+
+  function closeManagePanesDialog() {
+    document.getElementById("managePanesModal").style.display = "none";
+  }
+
+  function renderPanesList() {
+    const list = document.getElementById("panesList");
+    list.innerHTML = "";
+    (panesCache || []).forEach((p, idx) => {
+      const row = document.createElement("div");
+      row.style.cssText = "display:flex;align-items:center;gap:6px;background:rgba(15,23,42,0.4);border:1px solid rgba(148,163,184,0.15);padding:8px 10px;border-radius:8px";
+      const nameInput = document.createElement("input");
+      nameInput.value = p.name;
+      nameInput.style.cssText = "flex:1;margin:0;padding:6px 8px";
+      nameInput.onblur = () => renamePaneIfChanged(p.id, p.name, nameInput.value);
+      nameInput.onkeydown = (e) => { if (e.key === "Enter") nameInput.blur(); };
+
+      const count = document.createElement("span");
+      count.textContent = `${p.rack_count} rack${p.rack_count === 1 ? "" : "s"}`;
+      count.style.cssText = "font-size:11px;color:#94a3b8;min-width:60px;text-align:right";
+
+      const upBtn = document.createElement("button");
+      upBtn.textContent = "↑";
+      upBtn.title = "Move up";
+      upBtn.disabled = idx === 0;
+      upBtn.style.cssText = "padding:4px 10px;font-size:13px;background:rgba(37,99,235,0.3);color:#93c5fd;border:1px solid rgba(37,99,235,0.3);border-radius:6px;cursor:pointer";
+      upBtn.onclick = () => movePane(idx, -1);
+
+      const downBtn = document.createElement("button");
+      downBtn.textContent = "↓";
+      downBtn.title = "Move down";
+      downBtn.disabled = idx === panesCache.length - 1;
+      downBtn.style.cssText = upBtn.style.cssText;
+      downBtn.onclick = () => movePane(idx, 1);
+
+      const delBtn = document.createElement("button");
+      delBtn.textContent = "Delete";
+      delBtn.disabled = p.id === 1;
+      delBtn.style.cssText = "padding:4px 10px;font-size:13px;background:rgba(220,38,38,0.2);color:rgba(248,113,113,0.9);border:1px solid rgba(220,38,38,0.3);border-radius:6px;cursor:pointer;font-weight:700";
+      if (p.id === 1) delBtn.title = "Default pane cannot be deleted";
+      delBtn.onclick = () => deletePane(p.id);
+
+      row.appendChild(nameInput);
+      row.appendChild(count);
+      row.appendChild(upBtn);
+      row.appendChild(downBtn);
+      row.appendChild(delBtn);
+      list.appendChild(row);
+    });
+  }
+
+  async function renamePaneIfChanged(id, oldName, newName) {
+    newName = (newName || "").trim();
+    if (!newName || newName === oldName) { renderPanesList(); return; }
+    try {
+      const res = await fetch("/api/panes/rename", {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({id: id, name: newName})
+      });
+      const data = await res.json();
+      if (!data.ok) throw new Error(data.error || "Rename failed");
+      await loadPanes();
+      renderPanesList();
+    } catch(e) {
+      document.getElementById("managePanesError").textContent = String(e.message || e);
+      renderPanesList();
+    }
+  }
+
+  async function movePane(idx, delta) {
+    const n = panesCache.length;
+    const to = idx + delta;
+    if (to < 0 || to >= n) return;
+    const reordered = [...panesCache];
+    const [moved] = reordered.splice(idx, 1);
+    reordered.splice(to, 0, moved);
+    try {
+      await fetch("/api/panes/order", {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ids: reordered.map(p => p.id)})
+      });
+      await loadPanes();
+      renderPanesList();
+    } catch(e) {
+      document.getElementById("managePanesError").textContent = "Reorder failed";
+    }
+  }
+
+  async function deletePane(id) {
+    if (!confirm("Delete this pane? (Only allowed if it has no racks.)")) return;
+    try {
+      const res = await fetch("/api/panes/delete", {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({id: id})
+      });
+      const data = await res.json();
+      if (!data.ok) { document.getElementById("managePanesError").textContent = data.error || "Delete failed"; return; }
+      document.getElementById("managePanesError").textContent = "";
+      await loadPanes();
+      renderPanesList();
+      render(racksCache);
+    } catch(e) {
+      document.getElementById("managePanesError").textContent = "Delete failed";
+    }
+  }
+
+  async function createPaneFromManage() {
+    const input = document.getElementById("newPaneName");
+    const name = (input.value || "").trim();
+    if (!name) return;
+    try {
+      const res = await fetch("/api/panes", {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({name: name})
+      });
+      const data = await res.json();
+      if (!data.ok) { document.getElementById("managePanesError").textContent = data.error || "Create failed"; return; }
+      input.value = "";
+      document.getElementById("managePanesError").textContent = "";
+      await loadPanes();
+      renderPanesList();
+    } catch(e) {
+      document.getElementById("managePanesError").textContent = "Create failed";
+    }
+  }
 
   // ---------------- iDRAC Configuration Dialog ----------------
   function setIdracSaveEnabled(enabled) {
@@ -4332,7 +4777,7 @@ def ui():
     const viewVal = document.querySelector('input[name="pduViewStyle"]:checked').value;
     localStorage.setItem("pduViewStyle", viewVal);
     pduViewStyle = viewVal;
-    computeRackSize(racksCache.length);
+    computeRackSize(racksForCurrentPane(racksCache).length);
     render(racksCache);
     try {
       const titleRes = await fetch("/api/settings/title", {
@@ -4341,6 +4786,17 @@ def ui():
       });
       const titleData = await titleRes.json();
       if (titleData && titleData.ok && titleData.title) applyTitle(titleData.title);
+    } catch(e) {}
+    // Persist pane cycle interval (server-side; also updates local cycle timer).
+    const cycleRaw = (document.getElementById("paneCycleInput").value || "0").trim();
+    const cycleSecs = Math.max(0, Math.min(3600, parseInt(cycleRaw, 10) || 0));
+    try {
+      await fetch("/api/settings/pane_cycle_seconds", {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({seconds: cycleSecs})
+      });
+      paneCycleSeconds = cycleSecs;
+      restartCycleTimer();
     } catch(e) {}
     closeSettings();
   }
