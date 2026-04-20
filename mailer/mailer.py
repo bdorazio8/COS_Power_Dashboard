@@ -314,17 +314,235 @@ def parse_filename_end(filename):
 
 
 # ----------------------------------------------------------------------------
+# Body rendering — HTML + plain-text alternatives from the summary sidecar
+# ----------------------------------------------------------------------------
+
+def _fmt_num(v, suffix="", nd=2):
+    if v is None:
+        return "—"
+    try:
+        return f"{float(v):,.{nd}f}{suffix}"
+    except (TypeError, ValueError):
+        return str(v)
+
+
+def _fmt_int(v, suffix=""):
+    if v is None:
+        return "—"
+    try:
+        return f"{int(v):,}{suffix}"
+    except (TypeError, ValueError):
+        return str(v)
+
+
+def render_text_body(meta):
+    """Plain-text body for clients that can't render HTML, and as the spam-filter
+    friendly sibling of the HTML alternative. Uses aligned ASCII for readability."""
+    s = meta.get("summary") or {}
+    lab = s.get("lab", {})
+    gpu = s.get("gpu", {})
+    therm = s.get("thermals", {})
+    top_srv = s.get("top_servers", []) or []
+    top_gpu = (gpu.get("top_gpus") or [])
+
+    lines = []
+    lines.append("COS Lab Power Report")
+    lines.append("=" * 40)
+    lines.append(f"Window:  {meta['window_start']}  →  {meta['window_end']}")
+    lines.append(f"Hours:   {meta['window_hours']}")
+    lines.append(f"Scope:   {meta['scope_str']}")
+    lines.append("")
+    lines.append("KEY STATS")
+    lines.append(f"  Total energy in window:    {_fmt_num(lab.get('total_kwh'), ' kWh')}")
+    lines.append(f"  Peak lab power:            {_fmt_num(lab.get('peak_kw'), ' kW')}")
+    lines.append(f"  Current lab power:         {_fmt_num(lab.get('kw_now'), ' kW')}")
+    lines.append(f"  GPU energy in window:      {_fmt_num(lab.get('gpu_kwh'), ' kWh')}")
+    lines.append(f"  Servers in scope:          {_fmt_int(lab.get('server_count'))}")
+    lines.append(f"  NVIDIA GPUs / AMD GPUs:    {_fmt_int(lab.get('nv_gpu_count'))} / {_fmt_int(lab.get('amd_gpu_count'))}")
+    lines.append("")
+    if top_srv:
+        lines.append("TOP SERVERS BY ENERGY")
+        for i, row in enumerate(top_srv, 1):
+            lines.append(f"  {i}. {row.get('server','?'):<14}"
+                         f"avg {_fmt_num(row.get('avg_w'),' W',nd=0):>8}  "
+                         f"peak {_fmt_num(row.get('peak_w'),' W',nd=0):>8}  "
+                         f"{_fmt_num(row.get('kwh'),' kWh'):>12}  "
+                         f"({_fmt_num(row.get('pct_of_total'),'%',nd=1)})")
+        lines.append("")
+    if top_gpu:
+        lines.append("TOP GPUS BY ENERGY (NVIDIA)")
+        for i, row in enumerate(top_gpu, 1):
+            lines.append(f"  {i}. {row.get('host','?')} GPU{row.get('gpu','?')}   "
+                         f"{_fmt_num(row.get('kwh'),' kWh'):>10}")
+        lines.append("")
+    if therm:
+        lines.append("THERMALS (max over window)")
+        if "max_inlet_f" in therm:
+            lines.append(f"  Inlet:   {_fmt_num(therm.get('max_inlet_f'), '°F', nd=1)}  on {therm.get('max_inlet_server','?')}")
+        if "max_exhaust_f" in therm:
+            lines.append(f"  Exhaust: {_fmt_num(therm.get('max_exhaust_f'), '°F', nd=1)}  on {therm.get('max_exhaust_server','?')}")
+        lines.append("")
+    lines.append("Full report attached as PDF.")
+    lines.append("")
+    lines.append("--")
+    lines.append(f"Sent automatically by {meta.get('sender_label') or 'COS Power Dashboard'}.")
+    lines.append(f"Schedule: {meta.get('schedule','?')}  |  Attachment: {meta.get('filename','?')}")
+    return "\n".join(lines)
+
+
+def render_html_body(meta):
+    """Inline-styled HTML body. Email clients strip <head> and most external CSS,
+    so every style lives on the element via the style attribute. Uses tables for
+    layout because Outlook/Gmail renderers still treat flex/grid inconsistently."""
+    s = meta.get("summary") or {}
+    lab = s.get("lab", {})
+    gpu = s.get("gpu", {})
+    therm = s.get("thermals", {})
+    top_srv = s.get("top_servers", []) or []
+    top_gpu = (gpu.get("top_gpus") or [])
+
+    # Key-stats cards: 3 rows x 2 cols
+    stat_cards = [
+        ("Total Energy",  _fmt_num(lab.get("total_kwh"), " kWh")),
+        ("Peak Power",    _fmt_num(lab.get("peak_kw"), " kW")),
+        ("Current Load",  _fmt_num(lab.get("kw_now"), " kW")),
+        ("GPU Energy",    _fmt_num(lab.get("gpu_kwh"), " kWh")),
+        ("Servers",       _fmt_int(lab.get("server_count"))),
+        ("GPUs (NV / AMD)", f"{_fmt_int(lab.get('nv_gpu_count'))} / {_fmt_int(lab.get('amd_gpu_count'))}"),
+    ]
+    card_rows_html = ""
+    for i in range(0, len(stat_cards), 2):
+        cells = stat_cards[i:i+2]
+        tds = ""
+        for label, value in cells:
+            tds += (
+                '<td width="50%" style="background:#eff6ff;border-radius:6px;'
+                'padding:16px 18px;vertical-align:top;border:1px solid #dbeafe">'
+                f'<div style="font-size:11px;letter-spacing:0.5px;text-transform:uppercase;color:#6b7280;font-weight:600">{label}</div>'
+                f'<div style="font-size:22px;font-weight:700;color:#1e3a8a;margin-top:4px;line-height:1.2">{value}</div>'
+                '</td>'
+            )
+        card_rows_html += (
+            '<tr>' + tds.replace('</td><td', '</td><td style="width:12px"></td><td') + '</tr>'
+            '<tr><td colspan="3" style="height:12px"></td></tr>'
+        )
+
+    def _table(title, header_cells, data_rows):
+        thead = "".join(
+            f'<th align="left" style="padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:0.5px;color:#6b7280;font-weight:600;border-bottom:2px solid #e5e7eb">{h}</th>'
+            for h in header_cells
+        )
+        body = ""
+        for i, row in enumerate(data_rows):
+            bg = "#ffffff" if i % 2 == 0 else "#f9fafb"
+            tds = "".join(
+                f'<td style="padding:8px 10px;font-size:13px;color:#1f2937;border-bottom:1px solid #f3f4f6">{c}</td>'
+                for c in row
+            )
+            body += f'<tr style="background:{bg}">{tds}</tr>'
+        return (
+            f'<h3 style="margin:24px 0 10px;font-size:14px;font-weight:700;color:#1f2937;letter-spacing:-0.2px">{title}</h3>'
+            f'<table width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',sans-serif">'
+            f'<thead><tr>{thead}</tr></thead><tbody>{body}</tbody></table>'
+        )
+
+    top_srv_html = ""
+    if top_srv:
+        rows = [
+            [
+                r.get("server", "?"),
+                _fmt_num(r.get("avg_w"), " W", nd=0),
+                _fmt_num(r.get("peak_w"), " W", nd=0),
+                _fmt_num(r.get("kwh"), " kWh"),
+                _fmt_num(r.get("pct_of_total"), "%", nd=1),
+            ]
+            for r in top_srv
+        ]
+        top_srv_html = _table("Top Servers by Energy", ["Server", "Avg", "Peak", "Energy", "% of Total"], rows)
+
+    top_gpu_html = ""
+    if top_gpu:
+        rows = [
+            [f'{r.get("host","?")} GPU{r.get("gpu","?")}', _fmt_num(r.get("kwh"), " kWh")]
+            for r in top_gpu
+        ]
+        top_gpu_html = _table("Top GPUs by Energy (NVIDIA)", ["GPU", "Energy in window"], rows)
+
+    thermals_html = ""
+    if therm:
+        inlet_line  = exhaust_line = ""
+        if "max_inlet_f" in therm:
+            inlet_line = (
+                f'<div style="font-size:13px;color:#1f2937;margin:2px 0">'
+                f'<strong>Max inlet:</strong> {_fmt_num(therm.get("max_inlet_f"), "°F", nd=1)} '
+                f'on <code style="font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px">{therm.get("max_inlet_server","?")}</code></div>'
+            )
+        if "max_exhaust_f" in therm:
+            exhaust_line = (
+                f'<div style="font-size:13px;color:#1f2937;margin:2px 0">'
+                f'<strong>Max exhaust:</strong> {_fmt_num(therm.get("max_exhaust_f"), "°F", nd=1)} '
+                f'on <code style="font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px">{therm.get("max_exhaust_server","?")}</code></div>'
+            )
+        thermals_html = (
+            '<h3 style="margin:24px 0 10px;font-size:14px;font-weight:700;color:#1f2937;letter-spacing:-0.2px">Thermals</h3>'
+            + inlet_line + exhaust_line
+        )
+
+    return f"""\
+<!DOCTYPE html>
+<html>
+<body style="margin:0;padding:24px;background:#f3f4f6;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;color:#1f2937">
+  <table width="640" cellspacing="0" cellpadding="0" align="center"
+         style="max-width:640px;margin:0 auto;background:#ffffff;border-radius:10px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.08);border:1px solid #e5e7eb">
+    <tr><td style="background:linear-gradient(135deg,#1e3a8a,#2563eb);color:#ffffff;padding:28px 32px">
+      <div style="font-size:12px;letter-spacing:1px;text-transform:uppercase;opacity:0.8;font-weight:600">Automated Report</div>
+      <div style="font-size:22px;font-weight:700;letter-spacing:-0.4px;margin-top:2px">COS Lab Power Report</div>
+      <div style="font-size:13px;opacity:0.85;margin-top:6px">
+        <strong>{meta['window_start']}</strong> &rarr; <strong>{meta['window_end']}</strong>
+        &nbsp;·&nbsp; {meta['window_hours']}h
+        &nbsp;·&nbsp; {meta['scope_str']}
+      </div>
+    </td></tr>
+    <tr><td style="padding:24px 32px 4px">
+      <p style="margin:0 0 18px;font-size:14px;color:#4b5563;line-height:1.5">
+        Below is an automated summary of lab power and thermal activity for the reported window.
+        The full PDF report (per-cluster charts, per-server tables, top-10 GPU energy, thermals appendix)
+        is attached to this message.
+      </p>
+      <table width="100%" cellspacing="0" cellpadding="0" style="border-collapse:separate;border-spacing:0">
+        {card_rows_html}
+      </table>
+      {top_srv_html}
+      {top_gpu_html}
+      {thermals_html}
+    </td></tr>
+    <tr><td style="padding:16px 32px 24px;border-top:1px solid #e5e7eb;font-size:12px;color:#6b7280;line-height:1.6">
+      Sent automatically by <strong>{meta.get('sender_label') or 'COS Power Dashboard'}</strong>
+      &nbsp;·&nbsp; Schedule: <code style="font-family:ui-monospace,Menlo,Consolas,monospace">{meta.get('schedule','?')}</code><br/>
+      Attachment: <code style="font-family:ui-monospace,Menlo,Consolas,monospace">{meta.get('filename','?')}</code>
+    </td></tr>
+  </table>
+</body>
+</html>
+"""
+
+
+# ----------------------------------------------------------------------------
 # Email send
 # ----------------------------------------------------------------------------
 
-def send_email(cfg, to_list, subject, body, attach_path, sender_label):
+def send_email(cfg, to_list, subject, text_body, html_body, attach_path, sender_label):
     smtp = cfg["smtp"]
     from_addr = smtp["user"]
     msg = EmailMessage()
     msg["From"] = f"{sender_label} <{from_addr}>" if sender_label else from_addr
     msg["To"] = ", ".join(to_list)
     msg["Subject"] = subject
-    msg.set_content(body)
+    # Plain-text alternative goes in first; add_alternative promotes to
+    # multipart/alternative, then add_attachment wraps that in multipart/mixed.
+    msg.set_content(text_body)
+    if html_body:
+        msg.add_alternative(html_body, subtype="html")
     with open(attach_path, "rb") as f:
         msg.add_attachment(
             f.read(),
@@ -408,15 +626,15 @@ def health_check(cfg, delivery, state):
 # Archive step
 # ----------------------------------------------------------------------------
 
-def archive_on_remote(cfg, filename):
-    """Move the successfully-mailed report into reports/archive/ on the jumpbox."""
+def archive_on_remote(cfg, filename, json_sidecar=None):
+    """Move the mailed PDF (and its JSON sidecar, if present) into reports/archive/
+    on the jumpbox in a single SSH round-trip."""
     remote_dir = cfg["ssh"]["remote_reports_dir"]
-    # Single SSH call: mkdir -p then mv. Quoting the filename in case of spaces.
-    cmd = (
-        f"mkdir -p {remote_dir}/archive && "
-        f"mv {remote_dir}/{filename} {remote_dir}/archive/"
-    )
-    ssh_run(cfg, cmd)
+    parts = [f"mkdir -p {remote_dir}/archive", f"mv {remote_dir}/{filename} {remote_dir}/archive/"]
+    if json_sidecar:
+        # `|| true` so a missing sidecar doesn't fail the whole archive move.
+        parts.append(f"mv {remote_dir}/{json_sidecar} {remote_dir}/archive/ 2>/dev/null || true")
+    ssh_run(cfg, " && ".join(parts))
 
 
 # ----------------------------------------------------------------------------
@@ -492,26 +710,46 @@ def run_cycle(cfg, state, dry_run=False):
             log.error("Download failed for %s: %s", filename, e)
             continue
 
+        # Sidecar JSON (added to the dashboard in Phase-B polish). Missing
+        # sidecars are tolerated — older PDFs generated before the sidecar
+        # change won't have one; the email still goes out with just headline
+        # metadata, no stats cards.
+        json_filename = filename[:-4] + ".json"
+        json_local = DOWNLOAD_DIR / json_filename
+        summary = None
+        try:
+            scp_download(cfg, f"{remote_dir}/{json_filename}", json_local)
+            summary = json.loads(json_local.read_text())
+        except Exception as e:
+            log.warning("No summary sidecar for %s (%s) — will email without stats cards", filename, e)
+
         end_dt = parse_filename_end(filename) or datetime.fromtimestamp(local_path.stat().st_mtime)
         start_dt, end_dt = resolve_window(time_range, end_dt)
         subject = subject_tpl.format(
             start=start_dt.strftime("%Y-%m-%d"),
             end=end_dt.strftime("%Y-%m-%d"),
         )
-        body = (
-            f"Attached: {filename}\n\n"
-            f"Report window: {start_dt.strftime('%Y-%m-%d %H:%M')} → {end_dt.strftime('%Y-%m-%d %H:%M')}\n"
-            f"Schedule:      {schedule}\n"
-            f"Source:        COS Power Dashboard (grey network)\n\n"
-            f"This message was sent automatically by the COS Report Mailer.\n"
-        )
+        scope_list = (summary or {}).get("scope") or []
+        meta = {
+            "filename": filename,
+            "schedule": schedule,
+            "sender_label": sender_label,
+            "summary": summary,
+            "window_start": start_dt.strftime("%Y-%m-%d %H:%M"),
+            "window_end":   end_dt.strftime("%Y-%m-%d %H:%M"),
+            "window_hours": (summary or {}).get("window", {}).get("hours") or round((end_dt - start_dt).total_seconds() / 3600.0, 1),
+            "scope_str":    ", ".join(scope_list) if scope_list else "All clusters",
+        }
+        text_body = render_text_body(meta)
+        html_body = render_html_body(meta)
+
         if dry_run:
-            log.info("[DRY RUN] Would email %s to %s with subject %r",
-                     filename, recipients, subject)
+            log.info("[DRY RUN] Would email %s to %s with subject %r (summary=%s)",
+                     filename, recipients, subject, "yes" if summary else "no")
             continue
 
         try:
-            send_email(cfg, recipients, subject, body, local_path, sender_label)
+            send_email(cfg, recipients, subject, text_body, html_body, local_path, sender_label)
             # Record the send BEFORE trying to archive. If archive fails (or the
             # process dies right after), the next cycle sees this entry and
             # won't re-email.
@@ -523,17 +761,19 @@ def run_cycle(cfg, state, dry_run=False):
             continue
 
         try:
-            archive_on_remote(cfg, filename)
+            archive_on_remote(cfg, filename, json_sidecar=json_filename if summary else None)
             log.info("Archived %s on jumpbox", filename)
             sent_filenames.pop(filename, None)
             save_state(state)
         except Exception as e:
             log.error("Archive move failed for %s: %s — will retry next cycle (no duplicate email)", filename, e)
 
-        try:
-            local_path.unlink()
-        except OSError:
-            pass
+        for p in (local_path, json_local):
+            try:
+                if p.exists():
+                    p.unlink()
+            except OSError:
+                pass
 
     health_check(cfg, delivery, state)
 

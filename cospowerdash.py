@@ -1296,17 +1296,23 @@ def _run_scheduled_report():
     time_range_key = get_setting("report_time_range", "trailing_7d")
     scope          = get_setting("report_scope", "")
     start, end     = _resolve_time_range(time_range_key)
-    pdf_bytes, _internal_name, pages, warnings = _generate_graph_report_pdf(start, end, scope)
+    pdf_bytes, _internal_name, pages, warnings, summary = _generate_graph_report_pdf(start, end, scope)
     ts = _time.strftime("%Y-%m-%dT%H%M", _time.localtime(end))
     filename = f"lab_overview_{ts}.pdf"
     out_path = _os.path.join(REPORTS_DIR, filename)
     with open(out_path, "wb") as f:
         f.write(pdf_bytes)
-    logger.info("Scheduled report written: %s (%d pages, %d warnings)", out_path, pages, len(warnings))
-    # Retention prune: drop PDFs older than N days.
+    # JSON sidecar: same basename, .json extension. Consumed by the mailer to
+    # build a polished HTML email body without re-querying Prometheus.
+    json_path = out_path[:-4] + ".json"
+    with open(json_path, "w") as f:
+        json.dump(summary, f, indent=2, default=str)
+    logger.info("Scheduled report written: %s (%d pages, %d warnings) + sidecar json",
+                out_path, pages, len(warnings))
+    # Retention prune: drop PDF/JSON pairs older than N days.
     cutoff = _time.time() - REPORT_RETENTION_DAYS * 86400
     for fn in _os.listdir(REPORTS_DIR):
-        if not fn.startswith("lab_overview_") or not fn.endswith(".pdf"):
+        if not fn.startswith("lab_overview_") or not (fn.endswith(".pdf") or fn.endswith(".json")):
             continue
         fp = _os.path.join(REPORTS_DIR, fn)
         try:
@@ -1580,7 +1586,10 @@ def _generate_graph_report_pdf(start: int, end: int, clusters: str = ""):
       clusters    — comma-separated cluster labels; empty = all
 
     Returns:
-      (pdf_bytes, filename, pages_written, warnings) tuple.
+      (pdf_bytes, filename, pages_written, warnings, summary) tuple.
+      `summary` is a dict of the same headline stats the cover page uses, so
+      the mailer can render them into an HTML email body without having to
+      re-query Prometheus (which it can't reach from outside the grey network).
     Raises ReportError on bad input or missing config.
     """
     import io
@@ -1622,6 +1631,21 @@ def _generate_graph_report_pdf(start: int, end: int, clusters: str = ""):
     pdf_buf = io.BytesIO()
     pages_written = 0
     warnings: List[str] = []
+    # Summary dict mirrors the cover-page headline numbers so the mailer can
+    # render them in the email body without needing Prometheus access.
+    summary = {
+        "generated_at": _time.strftime("%Y-%m-%dT%H:%M:%S", _time.localtime()),
+        "window": {
+            "start_iso": _time.strftime("%Y-%m-%dT%H:%M:%S", _time.localtime(start)),
+            "end_iso":   _time.strftime("%Y-%m-%dT%H:%M:%S", _time.localtime(end)),
+            "hours":     round(duration_s / 3600.0, 2),
+        },
+        "scope": [label for label, _ in selected_clusters],
+        "lab": {},
+        "top_servers": [],
+        "gpu": {},
+        "thermals": {},
+    }
 
     with PdfPages(pdf_buf) as pdf:
 
@@ -1644,6 +1668,14 @@ def _generate_graph_report_pdf(start: int, end: int, clusters: str = ""):
                     cover_vals[k] = None
             else:
                 cover_vals[k] = None
+        summary["lab"] = {
+            "kw_now":        cover_vals.get("lab_kw_now"),
+            "peak_kw":       cover_vals.get("peak_lab_kw"),
+            "gpu_kwh":       cover_vals.get("lab_kwh"),
+            "server_count":  int(cover_vals["server_count"]) if cover_vals.get("server_count") is not None else None,
+            "nv_gpu_count":  int(cover_vals["nv_gpu_count"]) if cover_vals.get("nv_gpu_count") is not None else None,
+            "amd_gpu_count": int(cover_vals["amd_gpu_count"]) if cover_vals.get("amd_gpu_count") is not None else None,
+        }
 
         fig = plt.figure(figsize=(8.5, 11))
         fig.text(0.5, 0.92, "Lab Overview Report", ha="center", fontsize=22, fontweight="bold")
@@ -1788,6 +1820,13 @@ def _generate_graph_report_pdf(start: int, end: int, clusters: str = ""):
             total_kwh += kwh
             srv_rows.append((srv, avg_w, max_by_srv.get(srv, 0.0), kwh))
         srv_rows.sort(key=lambda r: r[3], reverse=True)
+        summary["lab"]["total_kwh"] = total_kwh
+        summary["top_servers"] = [
+            {"server": srv, "avg_w": round(a, 1), "peak_w": round(m, 1),
+             "kwh": round(k, 2),
+             "pct_of_total": round((k / total_kwh * 100) if total_kwh > 0 else 0, 1)}
+            for srv, a, m, k in srv_rows[:5]
+        ]
 
         fig = plt.figure(figsize=(8.5, 11))
         fig.text(0.5, 0.95, "Per-Server Power Summary", ha="center", fontsize=16, fontweight="bold")
@@ -1827,6 +1866,13 @@ def _generate_graph_report_pdf(start: int, end: int, clusters: str = ""):
                 kwh = 0.0
             gpu_rows.append((host, gpu, kwh))
         gpu_rows.sort(key=lambda r: r[2], reverse=True)
+        summary["gpu"] = {
+            "total_kwh": round(nv_total_kwh, 2),
+            "top_gpus": [
+                {"host": h, "gpu": g, "kwh": round(k, 2)}
+                for (h, g, k) in gpu_rows[:5]
+            ],
+        }
 
         fig = plt.figure(figsize=(8.5, 11))
         fig.text(0.5, 0.95, "GPU Energy Summary", ha="center", fontsize=16, fontweight="bold")
@@ -1854,6 +1900,14 @@ def _generate_graph_report_pdf(start: int, end: int, clusters: str = ""):
         in_by = {r["metric"].get("server","?"): float(r["value"][1]) for r in in_res}
         ex_by = {r["metric"].get("server","?"): float(r["value"][1]) for r in ex_res}
         all_servers_set = sorted(set(in_by) | set(ex_by))
+        if in_by:
+            worst_in_srv = max(in_by, key=in_by.get)
+            summary["thermals"]["max_inlet_f"] = round(in_by[worst_in_srv], 1)
+            summary["thermals"]["max_inlet_server"] = worst_in_srv
+        if ex_by:
+            worst_ex_srv = max(ex_by, key=ex_by.get)
+            summary["thermals"]["max_exhaust_f"] = round(ex_by[worst_ex_srv], 1)
+            summary["thermals"]["max_exhaust_server"] = worst_ex_srv
 
         fig = plt.figure(figsize=(8.5, 11))
         fig.text(0.5, 0.95, "Thermals Appendix", ha="center", fontsize=16, fontweight="bold")
@@ -1881,14 +1935,16 @@ def _generate_graph_report_pdf(start: int, end: int, clusters: str = ""):
     fn_start = _time.strftime("%Y-%m-%d_%H%M", _time.localtime(start))
     fn_end   = _time.strftime("%Y-%m-%d_%H%M", _time.localtime(end))
     filename = f"lab_overview_report_{fn_start}_to_{fn_end}.pdf"
-    return pdf_buf.getvalue(), filename, pages_written, warnings
+    summary["warnings"] = warnings
+    summary["pages"] = pages_written
+    return pdf_buf.getvalue(), filename, pages_written, warnings, summary
 
 @app.get("/api/reports/graph")
 def api_graph_report(start: int = 0, end: int = 0, clusters: str = ""):
     """Generate the Graph Report PDF and stream it back to the browser."""
     from fastapi.responses import Response, JSONResponse
     try:
-        pdf_bytes, filename, pages_written, warnings = _generate_graph_report_pdf(start, end, clusters)
+        pdf_bytes, filename, pages_written, warnings, _summary = _generate_graph_report_pdf(start, end, clusters)
     except ReportError as e:
         code = 500 if "matplotlib" in str(e) else 400
         return JSONResponse({"ok": False, "error": str(e)}, status_code=code)
