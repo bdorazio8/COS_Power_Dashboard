@@ -2966,6 +2966,15 @@ def ui():
 <body>
   <div class="page">
     <div class="top-icons">
+      <div class="icon-btn pane-nav" id="paneCycleBtn" onclick="togglePaneCycle()" title="Pause pane cycling" style="display:none">
+        <svg id="paneCycleIconPause" viewBox="0 0 24 24" aria-hidden="true">
+          <rect x="7" y="5" width="3.5" height="14" rx="1" fill="rgba(226,232,240,0.92)"/>
+          <rect x="13.5" y="5" width="3.5" height="14" rx="1" fill="rgba(226,232,240,0.92)"/>
+        </svg>
+        <svg id="paneCycleIconPlay" viewBox="0 0 24 24" aria-hidden="true" style="display:none">
+          <polygon points="7,5 19,12 7,19" fill="rgba(226,232,240,0.92)"/>
+        </svg>
+      </div>
       <div class="icon-btn pane-nav" id="panePrevBtn" onclick="stepPane(-1)" title="Previous Pane" style="display:none">
         <svg viewBox="0 0 24 24" aria-hidden="true">
           <polyline points="14 6 8 12 14 18" fill="none" stroke="rgba(226,232,240,0.92)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
@@ -3480,6 +3489,9 @@ def ui():
   let currentPaneId = parseInt(localStorage.getItem("currentPaneId") || "1", 10) || 1;
   let paneCycleSeconds = 0;
   let paneCycleTimer = null;
+  // Paused is a frontend-only toggle so it's per-browser (two wall displays
+  // can be paused independently). Persisted across refreshes via localStorage.
+  let paneCyclePaused = localStorage.getItem("paneCyclePaused") === "1";
 
   async function loadPanes() {
     try {
@@ -3502,10 +3514,24 @@ def ui():
   function updatePaneNavUi() {
     const prev = document.getElementById("panePrevBtn");
     const next = document.getElementById("paneNextBtn");
+    const cycleBtn = document.getElementById("paneCycleBtn");
     const label = document.getElementById("paneLabel");
     const multi = panesCache.length > 1;
     if (prev) prev.style.display = multi ? "" : "none";
     if (next) next.style.display = multi ? "" : "none";
+    // The play/pause button is only useful when cycling is actually configured
+    // (multi pane + interval > 0). Hide it otherwise — there's nothing to pause.
+    if (cycleBtn) {
+      const showCycle = multi && paneCycleSeconds > 0;
+      cycleBtn.style.display = showCycle ? "" : "none";
+      const pauseIcon = document.getElementById("paneCycleIconPause");
+      const playIcon = document.getElementById("paneCycleIconPlay");
+      if (pauseIcon && playIcon) {
+        pauseIcon.style.display = paneCyclePaused ? "none" : "";
+        playIcon.style.display  = paneCyclePaused ? "" : "none";
+      }
+      cycleBtn.title = paneCyclePaused ? "Resume pane cycling" : "Pause pane cycling";
+    }
     if (label) {
       if (multi) {
         const p = panesCache.find(x => x.id === currentPaneId) || panesCache[0];
@@ -3515,6 +3541,13 @@ def ui():
         label.style.display = "none";
       }
     }
+  }
+
+  function togglePaneCycle() {
+    paneCyclePaused = !paneCyclePaused;
+    localStorage.setItem("paneCyclePaused", paneCyclePaused ? "1" : "0");
+    updatePaneNavUi();
+    restartCycleTimer();
   }
 
   function stepPane(delta) {
@@ -3533,7 +3566,7 @@ def ui():
 
   function restartCycleTimer() {
     if (paneCycleTimer) { clearInterval(paneCycleTimer); paneCycleTimer = null; }
-    if (paneCycleSeconds > 0 && panesCache.length > 1) {
+    if (paneCycleSeconds > 0 && panesCache.length > 1 && !paneCyclePaused) {
       paneCycleTimer = setInterval(() => stepPane(1), paneCycleSeconds * 1000);
     }
   }
