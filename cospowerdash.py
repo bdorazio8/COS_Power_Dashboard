@@ -2488,17 +2488,22 @@ def ui():
 
   .ip-banner {
     margin-top: -1px;
-    padding: 2px 10px;
+    padding: 4px 10px;
     text-align: center;
     font-weight: 900;
     text-transform: uppercase;
     letter-spacing: 1.2px;
     color: white;
-    font-size: clamp(9px, 3.2cqi, 36px);
+    font-size: clamp(11px, 4cqi, 42px);
+    line-height: 1.1;
     background: #162f4d;
     border: 1px solid rgba(255,255,255,0.14);
     border-top: none;
     border-bottom: none;
+  }
+  .ip-banner > span {
+    display: block;
+    white-space: nowrap;
   }
 
   .modal {
@@ -3422,7 +3427,18 @@ def ui():
 
           let pduBanner = document.createElement("div");
           pduBanner.className = "ip-banner";
-          pduBanner.textContent = pdu.pdu_ip ? ((pdu.type === "servertech" ? "Server Tech" : pdu.type === "raritan" ? "Raritan" : "PDU") + ": " + pdu.pdu_ip) : "\u00A0";
+          if (pdu.pdu_ip) {
+            const label = pdu.type === "servertech" ? "Server Tech" : pdu.type === "raritan" ? "Raritan" : "PDU";
+            const labelEl = document.createElement("span");
+            labelEl.textContent = label + ":";
+            const ipEl = document.createElement("span");
+            ipEl.textContent = pdu.pdu_ip;
+            pduBanner.appendChild(labelEl);
+            pduBanner.appendChild(ipEl);
+          } else {
+            // Two blank lines so the banner keeps its height whether or not an IP is set
+            pduBanner.innerHTML = "<span>\u00A0</span><span>\u00A0</span>";
+          }
           col.appendChild(pduBanner);
 
           const ratedAForInline = (pdu.rated_a && pdu.rated_a > 0) ? pdu.rated_a : 30;
