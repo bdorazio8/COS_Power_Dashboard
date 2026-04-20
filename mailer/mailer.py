@@ -222,7 +222,16 @@ def fetch_remote_config(cfg):
     DOWNLOAD_DIR.mkdir(exist_ok=True)
     local = DOWNLOAD_DIR / "config.ini"
     remote_dir = cfg["ssh"]["remote_reports_dir"]
-    scp_download(cfg, f"{remote_dir}/config.ini", local)
+    try:
+        scp_download(cfg, f"{remote_dir}/config.ini", local)
+    except RuntimeError as e:
+        if "No such file" in str(e):
+            raise RuntimeError(
+                f"{remote_dir}/config.ini does not exist on the jumpbox yet.\n"
+                f"  Fix: open the dashboard UI and click Settings → Configure Report Delivery → Save.\n"
+                f"  That action writes config.ini with the current recipients/schedule/etc."
+            ) from None
+        raise
     parsed = configparser.ConfigParser()
     parsed.read(local)
     if "delivery" not in parsed:
