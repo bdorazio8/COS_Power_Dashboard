@@ -3158,6 +3158,20 @@ def ui():
     </div>
   </div>
 
+  <!-- Name-a-pane modal (used by the "+ Create new pane…" dropdown option) -->
+  <div class="modal" id="namePaneModal">
+    <div class="modal-content" style="max-width:360px">
+      <h3>Create New Pane</h3>
+      <div style="font-size:12px;color:rgba(148,163,184,0.85);margin-bottom:8px">Give the new pane a short, recognizable name. You can rename it later under Settings → Manage Panes.</div>
+      <input id="namePaneInput" placeholder="e.g. Phase 0" style="margin-bottom:8px" autocomplete="off" />
+      <div id="namePaneError" style="color:#f87171;font-weight:700;font-size:13px;min-height:16px;margin-bottom:4px"></div>
+      <div class="row">
+        <button class="primary" id="namePaneOkBtn">Create</button>
+        <button id="namePaneCancelBtn">Cancel</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Manage Panes Modal -->
   <div class="modal" id="managePanesModal">
     <div class="modal-content">
@@ -3965,7 +3979,12 @@ def ui():
   }
 
   // Populate a <select> with existing panes + a "+ Create new pane…" option.
-  // Selected value stays on selectedId. After a create, the new pane becomes selected.
+  // Also explicitly sets sel.value after all options are in the DOM so the
+  // browser actually commits the new selection — some browsers don't update
+  // `selectedIndex` reliably when you only set `opt.selected = true` during
+  // appendChild, especially right after the user changed the selection.
+  // Tracks the last non-__create__ value on sel.dataset.lastPaneId so we can
+  // revert cleanly when the user cancels the create flow.
   function populatePaneSelect(selectId, selectedId) {
     const sel = document.getElementById(selectId);
     if (!sel) return;
@@ -3973,21 +3992,58 @@ def ui():
     (panesCache || []).forEach(p => {
       const opt = document.createElement("option");
       opt.value = String(p.id); opt.textContent = p.name;
-      if (p.id === selectedId) opt.selected = true;
       sel.appendChild(opt);
     });
     const createOpt = document.createElement("option");
     createOpt.value = "__create__";
     createOpt.textContent = "+ Create new pane…";
     sel.appendChild(createOpt);
+    const fallback = (panesCache[0] && panesCache[0].id) || 1;
+    sel.value = String(selectedId || fallback);
+    sel.dataset.lastPaneId = sel.value;
+  }
+
+  // Promise-based replacement for window.prompt that uses the in-app modal.
+  // Resolves to the trimmed name on Create, or null on Cancel.
+  function showPanePrompt() {
+    return new Promise((resolve) => {
+      const modal = document.getElementById("namePaneModal");
+      const input = document.getElementById("namePaneInput");
+      const err = document.getElementById("namePaneError");
+      const okBtn = document.getElementById("namePaneOkBtn");
+      const cancelBtn = document.getElementById("namePaneCancelBtn");
+      input.value = "";
+      err.textContent = "";
+      modal.style.display = "flex";
+      setTimeout(() => input.focus(), 50);
+      const cleanup = () => {
+        okBtn.onclick = null;
+        cancelBtn.onclick = null;
+        input.onkeydown = null;
+        modal.style.display = "none";
+      };
+      okBtn.onclick = () => {
+        const val = input.value.trim();
+        if (!val) { err.textContent = "Enter a name"; return; }
+        cleanup(); resolve(val);
+      };
+      cancelBtn.onclick = () => { cleanup(); resolve(null); };
+      input.onkeydown = (e) => {
+        if (e.key === "Enter") { e.preventDefault(); okBtn.click(); }
+        else if (e.key === "Escape") { e.preventDefault(); cancelBtn.click(); }
+      };
+    });
   }
 
   async function onPaneSelectChange(sel, which) {
-    if (sel.value !== "__create__") return;
-    const name = (window.prompt("Name for the new pane:") || "").trim();
+    if (sel.value !== "__create__") {
+      sel.dataset.lastPaneId = sel.value;
+      return;
+    }
+    const fallback = sel.dataset.lastPaneId || String((panesCache[0] && panesCache[0].id) || 1);
+    const name = await showPanePrompt();
     if (!name) {
-      // Revert to first pane so we don't leave __create__ selected
-      sel.value = String(panesCache[0] ? panesCache[0].id : 1);
+      sel.value = fallback;
       return;
     }
     try {
@@ -3998,14 +4054,14 @@ def ui():
       const data = await res.json();
       if (!data || !data.ok) {
         alert((data && data.error) || "Could not create pane");
-        sel.value = String(panesCache[0] ? panesCache[0].id : 1);
+        sel.value = fallback;
         return;
       }
       await loadPanes();
       populatePaneSelect(which === "edit" ? "editPaneSelect" : "addPaneSelect", data.id);
     } catch(e) {
       alert("Create failed");
-      sel.value = String(panesCache[0] ? panesCache[0].id : 1);
+      sel.value = fallback;
     }
   }
   function closeAdd() {
@@ -4188,7 +4244,6 @@ def ui():
     const pduIp = document.getElementById("pduIp").value.trim();
     const pdu2Ip = document.getElementById("pdu2Ip").value.trim();
     const paneSel = document.getElementById("addPaneSelect");
-    const paneId = parseInt((paneSel && paneSel.value !== "__create__" ? paneSel.value : "1"), 10) || 1;
 
     const errEl = document.getElementById("addError");
     errEl.textContent = "";
@@ -4197,6 +4252,11 @@ def ui():
       errEl.textContent = "Enter a rack label";
       return;
     }
+    if (paneSel && paneSel.value === "__create__") {
+      errEl.textContent = "Finish creating the pane first, or pick an existing one";
+      return;
+    }
+    const paneId = parseInt((paneSel && paneSel.value) || "1", 10) || 1;
 
     btn.disabled = true;
     btn.classList.add("disabled");
@@ -4349,11 +4409,15 @@ def ui():
     const pduIp = document.getElementById("editPduIp").value.trim();
     const pdu2Ip = document.getElementById("editPdu2Ip").value.trim();
     const paneSel = document.getElementById("editPaneSelect");
-    const paneId = parseInt((paneSel && paneSel.value !== "__create__" ? paneSel.value : "1"), 10) || 1;
     const errEl = document.getElementById("editError");
     errEl.textContent = "";
 
     if (!label) { errEl.textContent = "Enter a rack label"; return; }
+    if (paneSel && paneSel.value === "__create__") {
+      errEl.textContent = "Finish creating the pane first, or pick an existing one";
+      return;
+    }
+    const paneId = parseInt((paneSel && paneSel.value) || "1", 10) || 1;
 
     btn.disabled = true; btn.classList.add("disabled");
     try {
