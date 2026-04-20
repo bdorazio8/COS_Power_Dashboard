@@ -7,3 +7,7 @@ powerdash.db
 reports/*.pdf
 reports/config.ini
 reports/sent.log
+
+mailer/mailer.ini
+mailer/mailer.state.json
+mailer/downloads/
