@@ -202,6 +202,21 @@ def ssh_run(cfg, remote_cmd, timeout=30):
     return res.stdout
 
 
+def resolve_remote_dir(cfg):
+    """Resolve the configured remote_reports_dir to an absolute path on the jumpbox.
+    Tilde expansion would normally happen on the remote, but OpenSSH 9.0+ scp uses
+    SFTP by default and the SFTP server does NOT expand ~. So we run the expansion
+    through an actual shell on the jumpbox before any SCP invocations."""
+    raw = cfg["ssh"]["remote_reports_dir"]
+    if not raw.startswith("~"):
+        return raw  # already absolute
+    # `echo` through the remote shell expands tilde, symlinks, env vars, etc.
+    out = ssh_run(cfg, f"echo {raw}").strip()
+    if not out:
+        raise RuntimeError(f"Could not resolve remote path {raw!r} on jumpbox")
+    return out
+
+
 def scp_download(cfg, remote_path, local_path, timeout=120):
     host = cfg["ssh"]["host"]
     res = subprocess.run(
@@ -410,6 +425,12 @@ def archive_on_remote(cfg, filename):
 
 def run_cycle(cfg, state, dry_run=False):
     DOWNLOAD_DIR.mkdir(exist_ok=True)
+    # Resolve the remote reports dir once so every SSH + SCP uses the absolute
+    # path (works around the OpenSSH 9+ SFTP tilde-expansion regression).
+    abs_remote = resolve_remote_dir(cfg)
+    if abs_remote != cfg["ssh"]["remote_reports_dir"]:
+        log.info("Resolved %s → %s", cfg["ssh"]["remote_reports_dir"], abs_remote)
+        cfg["ssh"]["remote_reports_dir"] = abs_remote
     log.info("Cycle start (host=%s, dir=%s)", cfg["ssh"]["host"], cfg["ssh"]["remote_reports_dir"])
     delivery = fetch_remote_config(cfg)
     recipients = [r.strip() for r in delivery.get("recipients", "").split(",") if r.strip()]
