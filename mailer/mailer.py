@@ -418,12 +418,43 @@ def run_cycle(cfg, state, dry_run=False):
         health_check(cfg, delivery, state)
         return
 
+    # sent_filenames tracks PDFs we've already emailed but whose archive move
+    # hadn't been confirmed yet. If the same filename turns up in pending next
+    # cycle, we skip the email (avoiding a duplicate to the recipients) and
+    # just retry the archive. On archive success we drop the entry so the
+    # state stays bounded.
+    sent_filenames = state.setdefault("sent_filenames", {})
+
     if not recipients:
-        log.warning("Reports are pending but recipients list is empty — fix in dashboard Settings. Skipping.")
-        return
+        # Only skip the new-sends; still retry any previously-emailed archives
+        # that are in a stuck state. Recipients aren't needed for that.
+        stuck = [f for f in pending if f in sent_filenames]
+        if not stuck:
+            log.warning("Reports are pending but recipients list is empty — fix in dashboard Settings. Skipping.")
+            return
+        log.warning("Recipients empty; only retrying archive moves for %d previously-sent report(s)", len(stuck))
+        pending = stuck
 
     remote_dir = cfg["ssh"]["remote_reports_dir"]
     for filename in pending:
+        already_sent = filename in sent_filenames
+
+        if already_sent:
+            # Email was confirmed on a previous cycle but archive didn't land.
+            # Skip download + send entirely; go straight to the archive retry.
+            log.info("Retrying archive for %s (already emailed %s)", filename, sent_filenames[filename])
+            if dry_run:
+                log.info("[DRY RUN] Would retry archive for %s", filename)
+                continue
+            try:
+                archive_on_remote(cfg, filename)
+                log.info("Archived %s on jumpbox (retry succeeded)", filename)
+                sent_filenames.pop(filename, None)
+                save_state(state)
+            except Exception as e:
+                log.error("Archive retry still failing for %s: %s", filename, e)
+            continue
+
         local_path = DOWNLOAD_DIR / filename
         try:
             scp_download(cfg, f"{remote_dir}/{filename}", local_path)
@@ -451,6 +482,11 @@ def run_cycle(cfg, state, dry_run=False):
 
         try:
             send_email(cfg, recipients, subject, body, local_path, sender_label)
+            # Record the send BEFORE trying to archive. If archive fails (or the
+            # process dies right after), the next cycle sees this entry and
+            # won't re-email.
+            sent_filenames[filename] = datetime.now().isoformat(timespec="seconds")
+            save_state(state)
             log.info("Emailed %s to %s", filename, recipients)
         except Exception as e:
             log.exception("Email failed for %s: %s — leaving on jumpbox, will retry next cycle", filename, e)
@@ -459,8 +495,10 @@ def run_cycle(cfg, state, dry_run=False):
         try:
             archive_on_remote(cfg, filename)
             log.info("Archived %s on jumpbox", filename)
+            sent_filenames.pop(filename, None)
+            save_state(state)
         except Exception as e:
-            log.error("Archive move failed for %s: %s — file still in reports/, will re-send next cycle!", filename, e)
+            log.error("Archive move failed for %s: %s — will retry next cycle (no duplicate email)", filename, e)
 
         try:
             local_path.unlink()
