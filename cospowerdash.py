@@ -3290,7 +3290,7 @@ def ui():
 
       <div style="border-top:1px solid rgba(255,255,255,0.08);padding-top:10px;margin-bottom:4px">
         <span style="color:#cbd5e1;font-weight:600">Test the pipeline:</span>
-        <span style="font-size:11px;color:rgba(148,163,184,0.7);font-weight:400">(generates one PDF in <code>reports/</code> right now using the values above — save first)</span>
+        <span style="font-size:11px;color:rgba(148,163,184,0.7);font-weight:400">(saves the current form state, then generates one PDF in <code>reports/</code> using those values)</span>
       </div>
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
         <button onclick="generateReportNow()" style="white-space:nowrap;padding:10px 14px;font-size:13px;background:rgba(37,99,235,0.3);color:#93c5fd;border:1px solid rgba(37,99,235,0.3);border-radius:10px;cursor:pointer;font-weight:700">Generate Now</button>
@@ -5140,6 +5140,26 @@ def ui():
 
   async function generateReportNow() {
     const result = document.getElementById("rdGenResult");
+    // Implicitly save the current form state first. Without this, a user who
+    // changes Time Range / Recipients / etc. and clicks Generate Now without
+    // clicking Save first would get a PDF built from the *previously-saved*
+    // settings — the bug that used to ship a trailing_7d window when the form
+    // dropdown clearly said "Previous Mon–Fri".
+    result.textContent = "Saving settings..."; result.style.color = "#94a3b8";
+    try {
+      const saveRes = await fetch("/api/settings/report_delivery", {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify(_reportDeliveryBody())
+      });
+      const saveData = await saveRes.json();
+      if (!saveData || !saveData.ok) {
+        result.textContent = (saveData && saveData.error) || "Could not save form state";
+        result.style.color = "#f87171";
+        return;
+      }
+    } catch(e) {
+      result.textContent = "Save failed"; result.style.color = "#f87171"; return;
+    }
     result.textContent = "Generating... (can take 30–90s)"; result.style.color = "#94a3b8";
     try {
       const res = await fetch("/api/reports/generate_now", {method:"POST"});

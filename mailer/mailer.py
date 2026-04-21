@@ -733,8 +733,24 @@ def run_cycle(cfg, state, dry_run=False):
         except Exception as e:
             log.warning("No summary sidecar for %s (%s) — will email without stats cards", filename, e)
 
-        end_dt = parse_filename_end(filename) or datetime.fromtimestamp(local_path.stat().st_mtime)
-        start_dt, end_dt = resolve_window(time_range, end_dt)
+        # Prefer the actual window the dashboard embedded in the sidecar JSON
+        # over recomputing here — the dashboard already resolved the time_range
+        # correctly when generating the PDF, and the PDF's contents reflect
+        # that window. If we recompute from the config.ini time_range we can
+        # disagree with the PDF (happens if config.ini lags the generation,
+        # or if the user changed the time_range between generations).
+        win = (summary or {}).get("window") or {}
+        start_dt = end_dt = None
+        if win.get("start_iso") and win.get("end_iso"):
+            try:
+                start_dt = datetime.fromisoformat(win["start_iso"])
+                end_dt   = datetime.fromisoformat(win["end_iso"])
+            except ValueError:
+                start_dt = end_dt = None
+        if not (start_dt and end_dt):
+            # Legacy PDFs without a sidecar — fall back to recompute from filename.
+            end_dt = parse_filename_end(filename) or datetime.fromtimestamp(local_path.stat().st_mtime)
+            start_dt, end_dt = resolve_window(time_range, end_dt)
         subject = subject_tpl.format(
             start=start_dt.strftime("%Y-%m-%d"),
             end=end_dt.strftime("%Y-%m-%d"),
@@ -747,7 +763,7 @@ def run_cycle(cfg, state, dry_run=False):
             "summary": summary,
             "window_start": start_dt.strftime("%Y-%m-%d %H:%M"),
             "window_end":   end_dt.strftime("%Y-%m-%d %H:%M"),
-            "window_hours": (summary or {}).get("window", {}).get("hours") or round((end_dt - start_dt).total_seconds() / 3600.0, 1),
+            "window_hours": win.get("hours") or round((end_dt - start_dt).total_seconds() / 3600.0, 1),
             "scope_str":    ", ".join(scope_list) if scope_list else "All clusters",
         }
         text_body = render_text_body(meta)
