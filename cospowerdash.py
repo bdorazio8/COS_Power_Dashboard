@@ -2069,10 +2069,18 @@ def _generate_graph_report_pdf(start: int, end: int, clusters: str = ""):
             fig.text(0.5, 0.5, "(no temperature data)", ha="center", color="#a00")
         pdf.savefig(fig); plt.close(fig); pages_written += 1
 
-        # ---------- Thermal heatmap helper ----------
-        import numpy as _np
-        def _draw_rack_heatmap(ax, by_server, title, cmap="RdYlGn_r"):
-            """Render a cabinet × slot heatmap onto ax. by_server: {server_name: float °F}."""
+        # ---------- Rack-visual helper ----------
+        # Draws each cabinet as a tall card with a navy header (cabinet label)
+        # and stacked server "slots" inside, colored by temperature. Mirrors
+        # the dashboard's rack cards so non-engineers can read the report
+        # spatially instead of decoding a grid.
+        import matplotlib.patches as _mpatches
+        import matplotlib.colors as _mcolors
+        from matplotlib.cm import ScalarMappable as _ScalarMappable
+        from collections import defaultdict as _defaultdict
+
+        def _draw_rack_visual(ax, by_server, title, vmin, vmax, cmap_name="RdYlGn_r"):
+            """Render cabinets-with-server-slots onto ax. by_server: {server: float °F}."""
             parsed = []
             for srv, val in by_server.items():
                 rcs = _parse_rcs(srv)
@@ -2084,36 +2092,98 @@ def _generate_graph_report_pdf(start: int, end: int, clusters: str = ""):
                         ha="center", va="center", color="#a00", transform=ax.transAxes)
                 ax.set_title(title, fontsize=11, fontweight="bold"); ax.axis("off")
                 return
-            cabs = sorted({(r, c) for ((r, c, _s), _v) in parsed})
-            max_slot = max(s for ((_r, _c, s), _v) in parsed)
-            grid = _np.full((max_slot, len(cabs)), _np.nan)
-            cab_index = {cab: i for i, cab in enumerate(cabs)}
-            for ((r, c, s), val) in parsed:
-                grid[s - 1, cab_index[(r, c)]] = val
-            im = ax.imshow(grid, aspect="auto", cmap=cmap, origin="upper")
-            ax.set_xticks(range(len(cabs)))
-            ax.set_xticklabels([f"r{r}c{c}" for (r, c) in cabs], fontsize=8)
-            ax.set_yticks(range(max_slot))
-            ax.set_yticklabels([f"s{i+1}" for i in range(max_slot)], fontsize=8)
-            ax.set_title(title, fontsize=11, fontweight="bold")
-            for y in range(grid.shape[0]):
-                for x in range(grid.shape[1]):
-                    v = grid[y, x]
-                    if not _np.isnan(v):
-                        ax.text(x, y, f"{v:.0f}", ha="center", va="center",
-                                fontsize=7, color="black")
-            plt.colorbar(im, ax=ax, fraction=0.04, pad=0.02, label="°F")
 
-        # ---------- Page N+3: Rack Heatmap (window max) ----------
+            cabs_dict = _defaultdict(list)  # (row, cab) -> [(slot, val), ...]
+            for ((r, c, s), val) in parsed:
+                cabs_dict[(r, c)].append((s, val))
+            cabs = sorted(cabs_dict.keys())
+            for k in cabs:
+                cabs_dict[k].sort()
+            max_slot = max(s for k in cabs for (s, _v) in cabs_dict[k])
+
+            cmap = plt.get_cmap(cmap_name)
+            norm = _mcolors.Normalize(vmin=vmin, vmax=vmax)
+
+            # Layout in data coordinates
+            n_cabs = len(cabs)
+            cab_w, cab_gap = 1.0, 0.22
+            header_h, slot_h = 0.55, 0.55
+            body_h = max_slot * slot_h
+            cab_h = header_h + body_h
+            total_w = n_cabs * cab_w + (n_cabs - 1) * cab_gap
+
+            ax.set_xlim(-0.15, total_w + 0.15)
+            ax.set_ylim(cab_h + 0.20, -0.20)  # invert Y so slot 1 is at top
+            ax.set_axis_off()
+            ax.set_title(title, fontsize=11, fontweight="bold", pad=6)
+
+            for ci, (r, c) in enumerate(cabs):
+                x = ci * (cab_w + cab_gap)
+                # Cabinet body (dark interior)
+                ax.add_patch(_mpatches.Rectangle(
+                    (x, header_h), cab_w, body_h,
+                    linewidth=1.0, edgecolor="#0f172a", facecolor="#0b1220",
+                ))
+                # Header bar (navy)
+                ax.add_patch(_mpatches.Rectangle(
+                    (x, 0), cab_w, header_h,
+                    linewidth=1.0, edgecolor="#0f172a", facecolor="#1e3a5f",
+                ))
+                ax.text(x + cab_w / 2, header_h / 2, f"r{r}c{c}",
+                        ha="center", va="center", color="white",
+                        fontsize=10, fontweight="bold")
+                # Server slots
+                slot_lookup = {s: v for (s, v) in cabs_dict[(r, c)]}
+                for s in range(1, max_slot + 1):
+                    sy = header_h + (s - 1) * slot_h
+                    pad_x, pad_y = 0.06, 0.05
+                    if s in slot_lookup:
+                        v = slot_lookup[s]
+                        face = cmap(norm(v))
+                        ax.add_patch(_mpatches.Rectangle(
+                            (x + pad_x, sy + pad_y),
+                            cab_w - 2 * pad_x, slot_h - 2 * pad_y,
+                            linewidth=0.6, edgecolor="#1e293b", facecolor=face,
+                        ))
+                        ax.text(x + pad_x + 0.05, sy + slot_h / 2, f"s{s}",
+                                ha="left", va="center", fontsize=7,
+                                color="black", fontweight="bold")
+                        ax.text(x + cab_w - pad_x - 0.05, sy + slot_h / 2, f"{v:.0f}°",
+                                ha="right", va="center", fontsize=8,
+                                color="black", fontweight="bold")
+                    else:
+                        ax.add_patch(_mpatches.Rectangle(
+                            (x + pad_x, sy + pad_y),
+                            cab_w - 2 * pad_x, slot_h - 2 * pad_y,
+                            linewidth=0.5, edgecolor="#1e293b",
+                            facecolor="#374151", alpha=0.5,
+                        ))
+                        ax.text(x + cab_w / 2, sy + slot_h / 2, "—",
+                                ha="center", va="center", fontsize=7, color="#9ca3af")
+
+            # Colorbar
+            sm = _ScalarMappable(norm=norm, cmap=cmap)
+            sm.set_array([])
+            cb = plt.colorbar(sm, ax=ax, fraction=0.025, pad=0.015, shrink=0.85)
+            cb.set_label("°F", fontsize=9)
+            cb.ax.tick_params(labelsize=8)
+
+        # ASHRAE-anchored color scales: green→red gradient is meaningful, not
+        # just relative to the data. Inlets clip near A1 allowable (90°F);
+        # exhausts cover their typical 80–130°F operating range.
+        IN_VMIN, IN_VMAX = 65.0, 90.0
+        EX_VMIN, EX_VMAX = 80.0, 130.0
+
+        # ---------- Page N+3: Rack Visual (window max) ----------
         fig = plt.figure(figsize=(8.5, 11))
-        fig.text(0.5, 0.96, "Thermals — Rack Heatmap", ha="center", fontsize=16, fontweight="bold")
-        fig.text(0.5, 0.93, "Max inlet / exhaust by physical position (window peak per server, °F)",
-                 ha="center", fontsize=10, color="#555")
+        fig.text(0.5, 0.96, "Thermals — Rack View (Window Max)", ha="center", fontsize=16, fontweight="bold")
+        fig.text(0.5, 0.935, "Each cabinet shows its servers stacked top-to-bottom (s1 on top), colored by peak temperature",
+                 ha="center", fontsize=9, color="#555")
         if in_by or ex_by:
-            ax_in = fig.add_axes([0.10, 0.53, 0.80, 0.34])
-            _draw_rack_heatmap(ax_in, in_by, "Max Inlet °F")
-            ax_ex = fig.add_axes([0.10, 0.08, 0.80, 0.34])
-            _draw_rack_heatmap(ax_ex, ex_by, "Max Exhaust °F")
+            ax_in = fig.add_axes([0.06, 0.51, 0.88, 0.38])
+            _draw_rack_visual(ax_in, in_by, "Max Inlet °F", IN_VMIN, IN_VMAX)
+            ax_ex = fig.add_axes([0.06, 0.05, 0.88, 0.38])
+            _draw_rack_visual(ax_ex, ex_by, "Max Exhaust °F", EX_VMIN, EX_VMAX)
         else:
             fig.text(0.5, 0.5, "(no temperature data)", ha="center", color="#a00")
         pdf.savefig(fig); plt.close(fig); pages_written += 1
@@ -2152,14 +2222,14 @@ def _generate_graph_report_pdf(start: int, end: int, clusters: str = ""):
         fig.text(0.5, 0.96, "Thermals — Worst Hour Snapshot", ha="center", fontsize=16, fontweight="bold")
         if peak_t is not None:
             ts_str = _time.strftime("%Y-%m-%d %H:%M %Z", _time.localtime(peak_t))
-            fig.text(0.5, 0.93, f"Inlet/exhaust at peak room inlet — {ts_str} (peak {peak_v:.1f} °F)",
-                     ha="center", fontsize=10, color="#555")
+            fig.text(0.5, 0.935, f"Inlet/exhaust at peak room inlet — {ts_str} (peak {peak_v:.1f} °F)",
+                     ha="center", fontsize=9, color="#555")
             in_snap = _value_at(in_series, peak_t)
             ex_snap = _value_at(ex_series, peak_t)
-            ax_in = fig.add_axes([0.10, 0.53, 0.80, 0.34])
-            _draw_rack_heatmap(ax_in, in_snap, "Inlet °F at peak moment")
-            ax_ex = fig.add_axes([0.10, 0.08, 0.80, 0.34])
-            _draw_rack_heatmap(ax_ex, ex_snap, "Exhaust °F at peak moment")
+            ax_in = fig.add_axes([0.06, 0.51, 0.88, 0.38])
+            _draw_rack_visual(ax_in, in_snap, "Inlet °F at peak moment", IN_VMIN, IN_VMAX)
+            ax_ex = fig.add_axes([0.06, 0.05, 0.88, 0.38])
+            _draw_rack_visual(ax_ex, ex_snap, "Exhaust °F at peak moment", EX_VMIN, EX_VMAX)
             summary["thermals"]["worst_hour_iso"] = _time.strftime("%Y-%m-%dT%H:%M:%S", _time.localtime(peak_t))
             summary["thermals"]["worst_hour_peak_inlet_f"] = round(peak_v, 1)
         else:
