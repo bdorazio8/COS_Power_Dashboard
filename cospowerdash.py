@@ -3635,7 +3635,10 @@ def ui():
 
 
 <script>
-  let ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws");
+  // Created by connectWs() further down so we can transparently reconnect
+  // after the server restarts (otherwise the wall display freezes on the
+  // last snapshot and needs a manual page refresh).
+  let ws = null;
   let racksCache = [];
   let isEdit = false;
   let draggedId = null;
@@ -3755,26 +3758,56 @@ def ui():
     return (all || []).filter(r => (r.pane_id || 1) === currentPaneId);
   }
 
-  ws.onmessage = (event) => {
-    let incoming = [];
-    try { incoming = JSON.parse(event.data) || []; } catch(e) { incoming = []; }
+  let wsReconnectDelay = 1000;        // ms; doubles on each failure
+  const WS_RECONNECT_DELAY_MAX = 30000;
+  let wsReconnectTimer = null;
 
-    if (isEdit || pendingOrderSave) {
-      const byId = new Map(incoming.map(r => [String(r.id), r]));
-      racksCache = racksCache
-        .filter(r => byId.has(String(r.id)))
-        .map(r => Object.assign({}, r, byId.get(String(r.id))));
+  function scheduleWsReconnect() {
+    if (wsReconnectTimer) return;
+    wsReconnectTimer = setTimeout(() => {
+      wsReconnectTimer = null;
+      connectWs();
+    }, wsReconnectDelay);
+    wsReconnectDelay = Math.min(wsReconnectDelay * 2, WS_RECONNECT_DELAY_MAX);
+  }
 
-      const existingIds = new Set(racksCache.map(r => String(r.id)));
-      for (const r of incoming) {
-        if (!existingIds.has(String(r.id))) racksCache.push(r);
+  function connectWs() {
+    const url = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws";
+    ws = new WebSocket(url);
+
+    ws.onopen = () => {
+      // Connection (re-)established — reset backoff so the next drop reacts
+      // quickly. Server pushes a fresh snapshot on connect, so the display
+      // resumes on its own without any extra fetch.
+      wsReconnectDelay = 1000;
+    };
+
+    ws.onmessage = (event) => {
+      let incoming = [];
+      try { incoming = JSON.parse(event.data) || []; } catch(e) { incoming = []; }
+
+      if (isEdit || pendingOrderSave) {
+        const byId = new Map(incoming.map(r => [String(r.id), r]));
+        racksCache = racksCache
+          .filter(r => byId.has(String(r.id)))
+          .map(r => Object.assign({}, r, byId.get(String(r.id))));
+
+        const existingIds = new Set(racksCache.map(r => String(r.id)));
+        for (const r of incoming) {
+          if (!existingIds.has(String(r.id))) racksCache.push(r);
+        }
+      } else {
+        racksCache = incoming;
       }
-    } else {
-      racksCache = incoming;
-    }
 
-    render(racksCache);
-  };
+      render(racksCache);
+    };
+
+    ws.onclose = () => { scheduleWsReconnect(); };
+    ws.onerror = () => { try { ws.close(); } catch(_) {} };
+  }
+
+  connectWs();
 
   function computeRackSize(count) {
     const container = document.getElementById("racks");
