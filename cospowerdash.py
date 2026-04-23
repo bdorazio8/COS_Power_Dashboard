@@ -1712,6 +1712,16 @@ def api_test_custom_reporting(data: dict):
 class ReportError(Exception):
     """Raised by _generate_graph_report_pdf when config/input is missing or invalid."""
 
+import re as _re
+_SRV_RCS_RE = _re.compile(r"^r(\d+)c(\d+)s(\d+)$", _re.IGNORECASE)
+
+def _parse_rcs(name: str):
+    """Parse 'r1c2s1' → (row, cabinet, slot). Returns None if not in r/c/s form."""
+    m = _SRV_RCS_RE.match((name or "").strip())
+    if not m:
+        return None
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+
 def _generate_graph_report_pdf(start: int, end: int, clusters: str = ""):
     """Render the Lab Overview Report PDF.
 
@@ -2057,6 +2067,104 @@ def _generate_graph_report_pdf(start: int, end: int, clusters: str = ""):
                 tbl[(0,c)].set_facecolor("#1e40af"); tbl[(0,c)].set_text_props(color="white", fontweight="bold")
         else:
             fig.text(0.5, 0.5, "(no temperature data)", ha="center", color="#a00")
+        pdf.savefig(fig); plt.close(fig); pages_written += 1
+
+        # ---------- Thermal heatmap helper ----------
+        import numpy as _np
+        def _draw_rack_heatmap(ax, by_server, title, cmap="RdYlGn_r"):
+            """Render a cabinet × slot heatmap onto ax. by_server: {server_name: float °F}."""
+            parsed = []
+            for srv, val in by_server.items():
+                rcs = _parse_rcs(srv)
+                if rcs is None:
+                    continue
+                parsed.append((rcs, val))
+            if not parsed:
+                ax.text(0.5, 0.5, "(no r/c/s-named servers with data)",
+                        ha="center", va="center", color="#a00", transform=ax.transAxes)
+                ax.set_title(title, fontsize=11, fontweight="bold"); ax.axis("off")
+                return
+            cabs = sorted({(r, c) for ((r, c, _s), _v) in parsed})
+            max_slot = max(s for ((_r, _c, s), _v) in parsed)
+            grid = _np.full((max_slot, len(cabs)), _np.nan)
+            cab_index = {cab: i for i, cab in enumerate(cabs)}
+            for ((r, c, s), val) in parsed:
+                grid[s - 1, cab_index[(r, c)]] = val
+            im = ax.imshow(grid, aspect="auto", cmap=cmap, origin="upper")
+            ax.set_xticks(range(len(cabs)))
+            ax.set_xticklabels([f"r{r}c{c}" for (r, c) in cabs], fontsize=8)
+            ax.set_yticks(range(max_slot))
+            ax.set_yticklabels([f"s{i+1}" for i in range(max_slot)], fontsize=8)
+            ax.set_title(title, fontsize=11, fontweight="bold")
+            for y in range(grid.shape[0]):
+                for x in range(grid.shape[1]):
+                    v = grid[y, x]
+                    if not _np.isnan(v):
+                        ax.text(x, y, f"{v:.0f}", ha="center", va="center",
+                                fontsize=7, color="black")
+            plt.colorbar(im, ax=ax, fraction=0.04, pad=0.02, label="°F")
+
+        # ---------- Page N+3: Rack Heatmap (window max) ----------
+        fig = plt.figure(figsize=(8.5, 11))
+        fig.text(0.5, 0.96, "Thermals — Rack Heatmap", ha="center", fontsize=16, fontweight="bold")
+        fig.text(0.5, 0.93, "Max inlet / exhaust by physical position (window peak per server, °F)",
+                 ha="center", fontsize=10, color="#555")
+        if in_by or ex_by:
+            ax_in = fig.add_axes([0.10, 0.53, 0.80, 0.34])
+            _draw_rack_heatmap(ax_in, in_by, "Max Inlet °F")
+            ax_ex = fig.add_axes([0.10, 0.08, 0.80, 0.34])
+            _draw_rack_heatmap(ax_ex, ex_by, "Max Exhaust °F")
+        else:
+            fig.text(0.5, 0.5, "(no temperature data)", ha="center", color="#a00")
+        pdf.savefig(fig); plt.close(fig); pages_written += 1
+
+        # ---------- Page N+4: Worst Hour Snapshot ----------
+        in_range = _prom_query_range(prom_url,
+            f'temperature{{sensor="Inlet_F",server=~"{scope_regex}"}}', start, end, step)
+        ex_range = _prom_query_range(prom_url,
+            f'temperature{{sensor="Exhaust_F",server=~"{scope_regex}"}}', start, end, step)
+        in_series = {r["metric"].get("server","?"):
+                     [(float(p[0]), float(p[1])) for p in r.get("values", [])] for r in in_range}
+        ex_series = {r["metric"].get("server","?"):
+                     [(float(p[0]), float(p[1])) for p in r.get("values", [])] for r in ex_range}
+
+        # Find timestamp where the room-wide max inlet was highest.
+        ts_to_max = {}
+        for pts in in_series.values():
+            for (t, v) in pts:
+                if v > ts_to_max.get(t, float("-inf")):
+                    ts_to_max[t] = v
+        peak_t = None; peak_v = float("-inf")
+        for t, v in ts_to_max.items():
+            if v > peak_v:
+                peak_v = v; peak_t = t
+
+        def _value_at(series, target_t):
+            out = {}
+            for srv, pts in series.items():
+                if not pts:
+                    continue
+                best = min(pts, key=lambda x: abs(x[0] - target_t))
+                out[srv] = best[1]
+            return out
+
+        fig = plt.figure(figsize=(8.5, 11))
+        fig.text(0.5, 0.96, "Thermals — Worst Hour Snapshot", ha="center", fontsize=16, fontweight="bold")
+        if peak_t is not None:
+            ts_str = _time.strftime("%Y-%m-%d %H:%M %Z", _time.localtime(peak_t))
+            fig.text(0.5, 0.93, f"Inlet/exhaust at peak room inlet — {ts_str} (peak {peak_v:.1f} °F)",
+                     ha="center", fontsize=10, color="#555")
+            in_snap = _value_at(in_series, peak_t)
+            ex_snap = _value_at(ex_series, peak_t)
+            ax_in = fig.add_axes([0.10, 0.53, 0.80, 0.34])
+            _draw_rack_heatmap(ax_in, in_snap, "Inlet °F at peak moment")
+            ax_ex = fig.add_axes([0.10, 0.08, 0.80, 0.34])
+            _draw_rack_heatmap(ax_ex, ex_snap, "Exhaust °F at peak moment")
+            summary["thermals"]["worst_hour_iso"] = _time.strftime("%Y-%m-%dT%H:%M:%S", _time.localtime(peak_t))
+            summary["thermals"]["worst_hour_peak_inlet_f"] = round(peak_v, 1)
+        else:
+            fig.text(0.5, 0.5, "(no inlet temperature time-series available)",
+                     ha="center", color="#a00")
         pdf.savefig(fig); plt.close(fig); pages_written += 1
 
         # PDF metadata
