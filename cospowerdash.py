@@ -2038,7 +2038,7 @@ def _generate_graph_report_pdf(start: int, end: int, clusters: str = ""):
             fig.text(0.5, 0.5, "(no GPU energy data)", ha="center", color="#a00")
         pdf.savefig(fig); plt.close(fig); pages_written += 1
 
-        # ---------- Page N+2: Thermals appendix ----------
+        # ---------- Thermals: window-max data (used by all thermal pages) ----------
         in_res = _prom_query(prom_url, f'max_over_time(temperature{{sensor="Inlet_F",server=~"{scope_regex}"}}[{duration_s}s])', t=end)
         ex_res = _prom_query(prom_url, f'max_over_time(temperature{{sensor="Exhaust_F",server=~"{scope_regex}"}}[{duration_s}s])', t=end)
         in_by = {r["metric"].get("server","?"): float(r["value"][1]) for r in in_res}
@@ -2052,22 +2052,6 @@ def _generate_graph_report_pdf(start: int, end: int, clusters: str = ""):
             worst_ex_srv = max(ex_by, key=ex_by.get)
             summary["thermals"]["max_exhaust_f"] = round(ex_by[worst_ex_srv], 1)
             summary["thermals"]["max_exhaust_server"] = worst_ex_srv
-
-        fig = plt.figure(figsize=(8.5, 11))
-        fig.text(0.5, 0.95, "Thermals Appendix", ha="center", fontsize=16, fontweight="bold")
-        fig.text(0.5, 0.92, f"Max inlet / exhaust temperatures over the window (°F)", ha="center", fontsize=10, color="#555")
-        ax = fig.add_axes([0.05, 0.05, 0.90, 0.85]); ax.axis("off")
-        td = [["Server", "Max Inlet °F", "Max Exhaust °F"]]
-        for srv in all_servers_set:
-            td.append([srv, f"{in_by.get(srv,0):.1f}", f"{ex_by.get(srv,0):.1f}"])
-        if len(td) > 1:
-            tbl = ax.table(cellText=td, loc="upper center", cellLoc="center", colWidths=[0.30,0.25,0.25])
-            tbl.auto_set_font_size(False); tbl.set_fontsize(9); tbl.scale(1, 1.5)
-            for c in range(3):
-                tbl[(0,c)].set_facecolor("#1e40af"); tbl[(0,c)].set_text_props(color="white", fontweight="bold")
-        else:
-            fig.text(0.5, 0.5, "(no temperature data)", ha="center", color="#a00")
-        pdf.savefig(fig); plt.close(fig); pages_written += 1
 
         # ---------- Rack-visual helper ----------
         # Draws each cabinet as a tall card with a navy header (cabinet label)
@@ -2235,6 +2219,23 @@ def _generate_graph_report_pdf(start: int, end: int, clusters: str = ""):
         else:
             fig.text(0.5, 0.5, "(no inlet temperature time-series available)",
                      ha="center", color="#a00")
+        pdf.savefig(fig); plt.close(fig); pages_written += 1
+
+        # ---------- Final thermal page: max-temps table ----------
+        fig = plt.figure(figsize=(8.5, 11))
+        fig.text(0.5, 0.95, "Thermals Appendix", ha="center", fontsize=16, fontweight="bold")
+        fig.text(0.5, 0.92, f"Max inlet / exhaust temperatures over the window (°F)", ha="center", fontsize=10, color="#555")
+        ax = fig.add_axes([0.05, 0.05, 0.90, 0.85]); ax.axis("off")
+        td = [["Server", "Max Inlet °F", "Max Exhaust °F"]]
+        for srv in all_servers_set:
+            td.append([srv, f"{in_by.get(srv,0):.1f}", f"{ex_by.get(srv,0):.1f}"])
+        if len(td) > 1:
+            tbl = ax.table(cellText=td, loc="upper center", cellLoc="center", colWidths=[0.30,0.25,0.25])
+            tbl.auto_set_font_size(False); tbl.set_fontsize(9); tbl.scale(1, 1.5)
+            for c in range(3):
+                tbl[(0,c)].set_facecolor("#1e40af"); tbl[(0,c)].set_text_props(color="white", fontweight="bold")
+        else:
+            fig.text(0.5, 0.5, "(no temperature data)", ha="center", color="#a00")
         pdf.savefig(fig); plt.close(fig); pages_written += 1
 
         # PDF metadata
