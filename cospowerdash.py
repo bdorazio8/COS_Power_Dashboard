@@ -2039,18 +2039,18 @@ def _generate_graph_report_pdf(start: int, end: int, clusters: str = ""):
         pdf.savefig(fig); plt.close(fig); pages_written += 1
 
         # ---------- Thermals: window-max data (used by all thermal pages) ----------
-        in_res = _prom_query(prom_url, f'max_over_time(temperature{{sensor="Inlet_F",server=~"{scope_regex}"}}[{duration_s}s])', t=end)
-        ex_res = _prom_query(prom_url, f'max_over_time(temperature{{sensor="Exhaust_F",server=~"{scope_regex}"}}[{duration_s}s])', t=end)
+        in_res = _prom_query(prom_url, f'max_over_time(temperature{{sensor="Inlet_C",server=~"{scope_regex}"}}[{duration_s}s])', t=end)
+        ex_res = _prom_query(prom_url, f'max_over_time(temperature{{sensor="Exhaust_C",server=~"{scope_regex}"}}[{duration_s}s])', t=end)
         in_by = {r["metric"].get("server","?"): float(r["value"][1]) for r in in_res}
         ex_by = {r["metric"].get("server","?"): float(r["value"][1]) for r in ex_res}
         all_servers_set = sorted(set(in_by) | set(ex_by))
         if in_by:
             worst_in_srv = max(in_by, key=in_by.get)
-            summary["thermals"]["max_inlet_f"] = round(in_by[worst_in_srv], 1)
+            summary["thermals"]["max_inlet_c"] = round(in_by[worst_in_srv], 1)
             summary["thermals"]["max_inlet_server"] = worst_in_srv
         if ex_by:
             worst_ex_srv = max(ex_by, key=ex_by.get)
-            summary["thermals"]["max_exhaust_f"] = round(ex_by[worst_ex_srv], 1)
+            summary["thermals"]["max_exhaust_c"] = round(ex_by[worst_ex_srv], 1)
             summary["thermals"]["max_exhaust_server"] = worst_ex_srv
 
         # ---------- Rack-visual helper ----------
@@ -2064,7 +2064,7 @@ def _generate_graph_report_pdf(start: int, end: int, clusters: str = ""):
         from collections import defaultdict as _defaultdict
 
         def _draw_rack_visual(ax, by_server, title, vmin, vmax, cmap_name="RdYlGn_r"):
-            """Render cabinets-with-server-slots onto ax. by_server: {server: float °F}."""
+            """Render cabinets-with-server-slots onto ax. by_server: {server: float °C}."""
             parsed = []
             for srv, val in by_server.items():
                 rcs = _parse_rcs(srv)
@@ -2132,7 +2132,7 @@ def _generate_graph_report_pdf(start: int, end: int, clusters: str = ""):
                         ax.text(x + pad_x + 0.05, sy + slot_h / 2, f"s{s}",
                                 ha="left", va="center", fontsize=7,
                                 color="black", fontweight="bold")
-                        ax.text(x + cab_w - pad_x - 0.05, sy + slot_h / 2, f"{v:.0f}°",
+                        ax.text(x + cab_w - pad_x - 0.05, sy + slot_h / 2, f"{v:.0f}°C",
                                 ha="right", va="center", fontsize=8,
                                 color="black", fontweight="bold")
                     else:
@@ -2149,14 +2149,15 @@ def _generate_graph_report_pdf(start: int, end: int, clusters: str = ""):
             sm = _ScalarMappable(norm=norm, cmap=cmap)
             sm.set_array([])
             cb = plt.colorbar(sm, ax=ax, fraction=0.025, pad=0.015, shrink=0.85)
-            cb.set_label("°F", fontsize=9)
+            cb.set_label("°C", fontsize=9)
             cb.ax.tick_params(labelsize=8)
 
-        # ASHRAE-anchored color scales: green→red gradient is meaningful, not
-        # just relative to the data. Inlets clip near A1 allowable (90°F);
-        # exhausts cover their typical 80–130°F operating range.
-        IN_VMIN, IN_VMAX = 65.0, 90.0
-        EX_VMIN, EX_VMAX = 80.0, 130.0
+        # Color scales anchored to operational concern, not raw data spread.
+        # Inlet: ASHRAE A1 recommended 18–27°C, allowable up to 32°C — red = at limit.
+        # Exhaust: 35°C is comfortable, ~50–55°C is normal under load,
+        # red kicks in at 65°C where you'd actually escalate.
+        IN_VMIN, IN_VMAX = 18.0, 32.0
+        EX_VMIN, EX_VMAX = 35.0, 65.0
 
         # ---------- Page N+3: Rack Visual (window max) ----------
         fig = plt.figure(figsize=(8.5, 11))
@@ -2165,18 +2166,18 @@ def _generate_graph_report_pdf(start: int, end: int, clusters: str = ""):
                  ha="center", fontsize=9, color="#555")
         if in_by or ex_by:
             ax_in = fig.add_axes([0.06, 0.51, 0.88, 0.38])
-            _draw_rack_visual(ax_in, in_by, "Max Inlet °F", IN_VMIN, IN_VMAX)
+            _draw_rack_visual(ax_in, in_by, "Max Inlet °C", IN_VMIN, IN_VMAX)
             ax_ex = fig.add_axes([0.06, 0.05, 0.88, 0.38])
-            _draw_rack_visual(ax_ex, ex_by, "Max Exhaust °F", EX_VMIN, EX_VMAX)
+            _draw_rack_visual(ax_ex, ex_by, "Max Exhaust °C", EX_VMIN, EX_VMAX)
         else:
             fig.text(0.5, 0.5, "(no temperature data)", ha="center", color="#a00")
         pdf.savefig(fig); plt.close(fig); pages_written += 1
 
         # ---------- Page N+4: Worst Hour Snapshot ----------
         in_range = _prom_query_range(prom_url,
-            f'temperature{{sensor="Inlet_F",server=~"{scope_regex}"}}', start, end, step)
+            f'temperature{{sensor="Inlet_C",server=~"{scope_regex}"}}', start, end, step)
         ex_range = _prom_query_range(prom_url,
-            f'temperature{{sensor="Exhaust_F",server=~"{scope_regex}"}}', start, end, step)
+            f'temperature{{sensor="Exhaust_C",server=~"{scope_regex}"}}', start, end, step)
         in_series = {r["metric"].get("server","?"):
                      [(float(p[0]), float(p[1])) for p in r.get("values", [])] for r in in_range}
         ex_series = {r["metric"].get("server","?"):
@@ -2206,16 +2207,16 @@ def _generate_graph_report_pdf(start: int, end: int, clusters: str = ""):
         fig.text(0.5, 0.96, "Thermals — Worst Hour Snapshot", ha="center", fontsize=16, fontweight="bold")
         if peak_t is not None:
             ts_str = _time.strftime("%Y-%m-%d %H:%M %Z", _time.localtime(peak_t))
-            fig.text(0.5, 0.935, f"Inlet/exhaust at peak room inlet — {ts_str} (peak {peak_v:.1f} °F)",
+            fig.text(0.5, 0.935, f"Inlet/exhaust at peak room inlet — {ts_str} (peak {peak_v:.1f} °C)",
                      ha="center", fontsize=9, color="#555")
             in_snap = _value_at(in_series, peak_t)
             ex_snap = _value_at(ex_series, peak_t)
             ax_in = fig.add_axes([0.06, 0.51, 0.88, 0.38])
-            _draw_rack_visual(ax_in, in_snap, "Inlet °F at peak moment", IN_VMIN, IN_VMAX)
+            _draw_rack_visual(ax_in, in_snap, "Inlet °C at peak moment", IN_VMIN, IN_VMAX)
             ax_ex = fig.add_axes([0.06, 0.05, 0.88, 0.38])
-            _draw_rack_visual(ax_ex, ex_snap, "Exhaust °F at peak moment", EX_VMIN, EX_VMAX)
+            _draw_rack_visual(ax_ex, ex_snap, "Exhaust °C at peak moment", EX_VMIN, EX_VMAX)
             summary["thermals"]["worst_hour_iso"] = _time.strftime("%Y-%m-%dT%H:%M:%S", _time.localtime(peak_t))
-            summary["thermals"]["worst_hour_peak_inlet_f"] = round(peak_v, 1)
+            summary["thermals"]["worst_hour_peak_inlet_c"] = round(peak_v, 1)
         else:
             fig.text(0.5, 0.5, "(no inlet temperature time-series available)",
                      ha="center", color="#a00")
@@ -2224,9 +2225,9 @@ def _generate_graph_report_pdf(start: int, end: int, clusters: str = ""):
         # ---------- Final thermal page: max-temps table ----------
         fig = plt.figure(figsize=(8.5, 11))
         fig.text(0.5, 0.95, "Thermals Appendix", ha="center", fontsize=16, fontweight="bold")
-        fig.text(0.5, 0.92, f"Max inlet / exhaust temperatures over the window (°F)", ha="center", fontsize=10, color="#555")
+        fig.text(0.5, 0.92, f"Max inlet / exhaust temperatures over the window (°C)", ha="center", fontsize=10, color="#555")
         ax = fig.add_axes([0.05, 0.05, 0.90, 0.85]); ax.axis("off")
-        td = [["Server", "Max Inlet °F", "Max Exhaust °F"]]
+        td = [["Server", "Max Inlet °C", "Max Exhaust °C"]]
         for srv in all_servers_set:
             td.append([srv, f"{in_by.get(srv,0):.1f}", f"{ex_by.get(srv,0):.1f}"])
         if len(td) > 1:

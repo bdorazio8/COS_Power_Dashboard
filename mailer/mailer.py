@@ -387,10 +387,10 @@ def render_text_body(meta):
         lines.append("")
     if therm:
         lines.append("THERMALS (max over window)")
-        if "max_inlet_f" in therm:
-            lines.append(f"  Inlet:   {_fmt_num(therm.get('max_inlet_f'), '°F', nd=1)}  on {therm.get('max_inlet_server','?')}")
-        if "max_exhaust_f" in therm:
-            lines.append(f"  Exhaust: {_fmt_num(therm.get('max_exhaust_f'), '°F', nd=1)}  on {therm.get('max_exhaust_server','?')}")
+        if "max_inlet_c" in therm:
+            lines.append(f"  Inlet:   {_fmt_num(therm.get('max_inlet_c'), '°C', nd=1)}  on {therm.get('max_inlet_server','?')}")
+        if "max_exhaust_c" in therm:
+            lines.append(f"  Exhaust: {_fmt_num(therm.get('max_exhaust_c'), '°C', nd=1)}  on {therm.get('max_exhaust_server','?')}")
         lines.append("")
     lines.append("Full report attached as PDF.")
     lines.append("")
@@ -481,16 +481,16 @@ def render_html_body(meta):
     thermals_html = ""
     if therm:
         inlet_line  = exhaust_line = ""
-        if "max_inlet_f" in therm:
+        if "max_inlet_c" in therm:
             inlet_line = (
                 f'<div style="font-size:13px;color:#1f2937;margin:2px 0">'
-                f'<strong>Max inlet:</strong> {_fmt_num(therm.get("max_inlet_f"), "°F", nd=1)} '
+                f'<strong>Max inlet:</strong> {_fmt_num(therm.get("max_inlet_c"), "°C", nd=1)} '
                 f'on <code style="font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px">{therm.get("max_inlet_server","?")}</code></div>'
             )
-        if "max_exhaust_f" in therm:
+        if "max_exhaust_c" in therm:
             exhaust_line = (
                 f'<div style="font-size:13px;color:#1f2937;margin:2px 0">'
-                f'<strong>Max exhaust:</strong> {_fmt_num(therm.get("max_exhaust_f"), "°F", nd=1)} '
+                f'<strong>Max exhaust:</strong> {_fmt_num(therm.get("max_exhaust_c"), "°C", nd=1)} '
                 f'on <code style="font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px">{therm.get("max_exhaust_server","?")}</code></div>'
             )
         thermals_html = (
