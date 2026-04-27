@@ -1764,6 +1764,10 @@ def _generate_graph_report_pdf(start: int, end: int, clusters: str = ""):
     if not selected_clusters:
         selected_clusters = list(GRAPH_REPORT_CLUSTERS)
     scope_regex = "|".join(f"({r})" for _, r in selected_clusters)
+    # DCGM exporters label hosts as "cos-ai-<server>" (e.g. cos-ai-r2c5s1) where
+    # power/thermal metrics use the bare server label. GPU queries scope on
+    # Hostname; this keeps NV/AMD totals from leaking in out-of-scope clusters.
+    scope_hostname_regex = f"cos-ai-({scope_regex})"
 
     duration_s = end - start
     # Step picked so each panel has roughly 300–600 points; floor at 30s (scrape interval)
@@ -1797,9 +1801,9 @@ def _generate_graph_report_pdf(start: int, end: int, clusters: str = ""):
         cover_q = {
             "lab_kw_now":   f'sum(power{{sensor="total",server=~"{scope_regex}"}}) / 1000',
             "server_count": f'count(power{{sensor="total",server=~"{scope_regex}"}})',
-            "nv_gpu_count": 'count(DCGM_FI_DEV_POWER_USAGE{job!="local-gpu"})',
-            "amd_gpu_count":'count(gpu_health)',
-            "lab_kwh":      f'(sum(increase(DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION[{duration_s}s]))) / 3.6e12',
+            "nv_gpu_count": f'count(DCGM_FI_DEV_POWER_USAGE{{job!="local-gpu",Hostname=~"{scope_hostname_regex}"}})',
+            "amd_gpu_count":f'count(gpu_health{{Hostname=~"{scope_hostname_regex}"}})',
+            "lab_kwh":      f'(sum(increase(DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION{{Hostname=~"{scope_hostname_regex}"}}[{duration_s}s]))) / 3.6e9',
             "peak_lab_kw":  f'max_over_time((sum(power{{sensor="total",server=~"{scope_regex}"}}))[{duration_s}s:{step}s]) / 1000',
         }
         cover_vals = {}
@@ -1917,7 +1921,7 @@ def _generate_graph_report_pdf(start: int, end: int, clusters: str = ""):
         )
         _draw_timeseries(
             ax_bot,
-            f'sum(DCGM_FI_DEV_POWER_USAGE) / 1000',
+            f'sum(DCGM_FI_DEV_POWER_USAGE{{Hostname=~"{scope_hostname_regex}"}}) / 1000',
             "kW", "Total NVIDIA GPU Power (kW)",
             label_key="__none__", max_legend=0,
         )
@@ -1993,12 +1997,12 @@ def _generate_graph_report_pdf(start: int, end: int, clusters: str = ""):
         # ---------- Page N+1: GPU energy summary + top-10 ----------
         # Total NV GPU energy in window from monotonic counter
         nv_kwh_res = _prom_query(prom_url,
-            f'(sum(increase(DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION[{duration_s}s]))) / 3.6e12', t=end)
+            f'(sum(increase(DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION{{Hostname=~"{scope_hostname_regex}"}}[{duration_s}s]))) / 3.6e9', t=end)
         nv_total_kwh = float(nv_kwh_res[0]["value"][1]) if nv_kwh_res else 0.0
 
         # Top-10 GPUs by energy in window
         top_q = (f'topk(10, sum by(Hostname,gpu) '
-                 f'(increase(DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION[{duration_s}s]))) / 3.6e9')  # → kWh
+                 f'(increase(DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION{{Hostname=~"{scope_hostname_regex}"}}[{duration_s}s]))) / 3.6e9')  # → kWh
         top_res = _prom_query(prom_url, top_q, t=end)
         gpu_rows = []
         for r in top_res:
